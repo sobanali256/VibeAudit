@@ -1,0 +1,27 @@
+# Private planning material (never commit)
+/VibeAudit Agent Rush Build Plan.md
+/private/
+/planning/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Node
+node_modules/
+.next/
+dist/
+out/
+coverage/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
