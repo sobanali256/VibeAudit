@@ -1,0 +1,15 @@
+# Local development only: Postgres for the web app + worker.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vibeaudit
+      POSTGRES_PASSWORD: vibeaudit
+      POSTGRES_DB: vibeaudit
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

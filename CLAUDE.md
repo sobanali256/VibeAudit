@@ -6,10 +6,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VibeAudit audits AI-generated Node web apps (Next.js, Vite/React, Express) by **running** them inside a sandbox, not just reading them. The input is a GitHub URL (the main path) or a zip upload. The output is a scorecard where every finding carries evidence: a code line, a screenshot or an HTTP response. Other stacks get a static-only report.
 
-The repo is being scaffolded. No build, lint or test commands exist yet. Add them here as soon as they do.
+## Commands
 
-## Planned layout
+This is a pnpm workspace (pnpm 11, Node ≥ 22). Run everything from the repo root.
 
+```bash
+pnpm install
+pnpm db:up                     # local Postgres (docker-compose.dev.yml), db:down to stop
+pnpm dev                       # web + worker in parallel
+pnpm --filter @vibeaudit/web dev
+pnpm --filter @vibeaudit/worker dev
+pnpm test                      # vitest, all packages
+pnpm vitest run packages/shared/src/github.test.ts   # one file
+pnpm vitest run -t "parseGitHubUrl"                  # by test name
+pnpm typecheck                 # web runs `next typegen` first (needed for LayoutProps etc.)
+pnpm lint
+pnpm build
+```
+
+- pnpm 11 blocks dependency install scripts unless they're allowed in `pnpm-workspace.yaml` (`allowBuilds`). Only allow what's required.
+- `apps/web` runs **Next.js 16**. Its APIs differ from older versions, so check `apps/web/node_modules/next/dist/docs/` before writing Next code (see `apps/web/AGENTS.md`).
+- `packages/shared` is consumed as TS source (no build step). Next transpiles it via `transpilePackages`, and the worker runs under `tsx`. Use extensionless relative imports (`moduleResolution: Bundler`).
+
+## Layout
+
+- `packages/shared`: types shared by web and worker. Includes the audit stages, timeouts and intake limits (`audit.ts`), and the finding schema (`finding.ts`), where every finding needs ≥1 evidence item. `parseGitHubUrl` (`github.ts`) is the single gate for user-supplied repo URLs, and its output is what gets interpolated into GitHub API paths.
 - `apps/web`: Next.js + TypeScript UI and API. It streams audit progress to the browser over SSE.
 - `apps/worker`: a separate Node process running the job queue and agent loop (planner, build-fixer, code reviewer, screenshot verifier). Long audits run here, never in Next.js route handlers.
 - `sandbox/`: container images (app runner with proxy preloads, Playwright/Lighthouse browser runner).
