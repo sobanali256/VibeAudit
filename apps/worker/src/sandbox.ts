@@ -154,6 +154,12 @@ export class Sandbox {
     return (r.stdout + r.stderr).slice(-MAX_OUTPUT);
   }
 
+  /** Whether a container is still running (false once it has exited, or if it's gone). */
+  async isRunning(name: string): Promise<boolean> {
+    const r = await this.docker(["inspect", "-f", "{{.State.Running}}", name]);
+    return r.code === 0 && r.stdout.trim() === "true";
+  }
+
   /** The container's IPv4 on the audit network (to pin as a host for the browser container). */
   async ipOf(name: string): Promise<string | null> {
     // `index` (not dotted access): the network name has hyphens, which a Go template

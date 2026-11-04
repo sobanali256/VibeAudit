@@ -35,6 +35,16 @@ export interface Plan {
 const asRecord = (v: unknown): Record<string, string> =>
   v && typeof v === "object" ? (v as Record<string, string>) : {};
 
+// package.json "main" is interpolated into a shell command run in the sandbox. Even though
+// that shell is inside gVisor (contained), only accept a plain repo-relative path so a crafted
+// "main" can't inject extra commands or escape the repo dir.
+function isSafeRelPath(p: string): boolean {
+  return /^[A-Za-z0-9._/-]{1,200}$/.test(p) && !p.startsWith("/") && !p.split("/").includes("..");
+}
+
+// Exact lockfile names (an unanchored /lock/ would treat e.g. mylock.txt as a lockfile).
+const LOCKFILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"]);
+
 function detectPackageManager(lockfiles: string[], pkg: Record<string, unknown>): PackageManager {
   const pm = typeof pkg.packageManager === "string" ? pkg.packageManager : "";
   if (lockfiles.includes("pnpm-lock.yaml") || pm.startsWith("pnpm")) return "pnpm";
@@ -89,7 +99,7 @@ export function planFromManifest(m: Manifest, opts: { declaredEnvNames?: string[
   const pm = detectPackageManager(m.lockfiles, pkg);
   const framework = detectFramework(deps, scripts);
 
-  const hasLock = m.lockfiles.some((f) => /lock/.test(f));
+  const hasLock = m.lockfiles.some((f) => LOCKFILES.has(f));
   const install = (hasLock && CI_INSTALL[pm]) || INSTALL[pm];
 
   const run = pm === "npm" ? "npm run" : pm; // `npm run build` vs `pnpm build`
@@ -98,7 +108,7 @@ export function planFromManifest(m: Manifest, opts: { declaredEnvNames?: string[
   let startCommand: string | null = null;
   if (scripts.start) startCommand = `${run} start`;
   else if (framework === "nextjs") startCommand = `${run} start`;
-  else if (typeof pkg.main === "string") startCommand = `node ${pkg.main}`;
+  else if (typeof pkg.main === "string" && isSafeRelPath(pkg.main)) startCommand = `node ${pkg.main}`;
   else startCommand = framework === "express" ? "node server.js" : null;
 
   const port = framework === "nextjs" || framework === "vite" ? 3000 : 3000;

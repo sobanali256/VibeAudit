@@ -107,7 +107,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     const req = buildApprovalRequest(id, plan, manifest);
     await requestApproval(sql, id, req);
     await ev(sql, id, "awaiting_approval", { requestId: req.requestId });
-    const decided = await waitForDecision(sql, id, deps.approvalPollMs ?? 2000);
+    const decided = await waitForDecision(sql, id, deps.approvalPollMs ?? 2000, Date.parse(req.expiresAt));
     if (decided.status === "cancelled") throw new Cancelled();
     const decision = decided.approval_decision!;
     if (decision.decision === "static_only") {
@@ -160,14 +160,19 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           env: { ...sandboxEnv(plan, canaries, id, testKeys, true), PORT: String(plan.port ?? 3000) },
           name: `va-${id}-app`,
         });
-        const ip = await waitForApp(sandbox, appName, plan.port ?? 3000);
+        const runDeadline = Date.now() + STAGE_TIMEOUTS_MS.run;
+        const ip = await waitForApp(sandbox, appName, plan.port ?? 3000, runDeadline);
         if (!ip) {
           staticOnly = true;
           staticReason = "the app did not start listening";
           await ev(sql, id, "log", { stage: "run", msg: tailLog({ stdout: await sandbox.logs(appName), stderr: "" }) });
         } else {
           await stage(sql, id, "dynamic");
-          await probe(sandbox, id, ip, plan.port ?? 3000, findings, sql);
+          // Cap dynamic probing by the remaining run budget; whatever we have is still reported.
+          await Promise.race([
+            probe(sandbox, id, ip, plan.port ?? 3000, findings, sql),
+            new Promise((r) => setTimeout(r, Math.max(1000, runDeadline - Date.now()))),
+          ]);
         }
       }
     }
@@ -260,12 +265,18 @@ function buildApprovalRequest(id: string, plan: Plan, manifest: { packageJson: R
   };
 }
 
-async function waitForDecision(sql: Sql, id: string, pollMs: number): Promise<AuditRow> {
+async function waitForDecision(sql: Sql, id: string, pollMs: number, deadlineMs: number): Promise<AuditRow> {
   for (;;) {
     const row = await getAudit(sql, id);
     if (!row) throw new Error("audit vanished while awaiting approval");
     if (row.status === "cancelled") return row;
     if (row.status !== "awaiting_approval" && row.approval_decision) return row;
+    // The single worker blocks here, so the queue's own expiry sweep can't run meanwhile —
+    // enforce the deadline ourselves, release the slot, and let the audit be cancelled.
+    if (Date.now() > deadlineMs) {
+      await finishAudit(sql, id, { status: "cancelled", error: "approval expired" }).catch(() => {});
+      throw new Cancelled();
+    }
     await new Promise((r) => setTimeout(r, pollMs));
   }
 }
@@ -294,19 +305,23 @@ function sandboxEnv(plan: Plan, canaries: Record<string, string>, id: string, te
   const env: Record<string, string> = { ...canaries };
   if (includeKeys) {
     for (const e of plan.env) {
-      if (e.provide === "placeholder" && (testKeys[e.name] || Object.hasOwn(KEY_PROVIDERS, e.name))) {
-        env[e.name] = keyPlaceholder(e.name, id);
-      }
+      // Only hand the app a placeholder when a real test key backs it; otherwise the proxy
+      // has no swap rule and the bare placeholder would just egress and fail auth.
+      if (e.provide === "placeholder" && testKeys[e.name]) env[e.name] = keyPlaceholder(e.name, id);
     }
   }
   return env;
 }
 
-async function waitForApp(sandbox: Sandbox, appName: string, port: number): Promise<string | null> {
-  for (let i = 0; i < 20; i++) {
+async function waitForApp(sandbox: Sandbox, appName: string, port: number, deadlineMs: number): Promise<string | null> {
+  while (Date.now() < deadlineMs) {
     await new Promise((r) => setTimeout(r, 1500));
     const ip = await sandbox.ipOf(appName);
-    if (!ip) return null; // container exited
+    if (!ip) {
+      // No IP: distinguish "crashed/exited" (give up) from "not up yet" (keep waiting).
+      if (!(await sandbox.isRunning(appName))) return null;
+      continue;
+    }
     // Probe the port from a throwaway container on the same network.
     const r = await sandbox.run({
       role: "browser",
@@ -316,6 +331,7 @@ async function waitForApp(sandbox: Sandbox, appName: string, port: number): Prom
       name: `va-${sandbox.auditId}-portcheck`,
     });
     if (r.code === 0) return ip;
+    if (!(await sandbox.isRunning(appName))) return null;
   }
   return null;
 }

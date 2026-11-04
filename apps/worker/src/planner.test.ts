@@ -48,7 +48,15 @@ describe("planFromManifest", () => {
     expect(byName.CUSTOM_THING).toBe("canary");
   });
 
-  it("uses a bootstrap install without a lockfile", () => {
+  it("uses a bootstrap install without a lockfile, and ignores lookalike filenames", () => {
     expect(planFromManifest(m({ dependencies: { express: "4" } }, [])).installCommand).toContain("npm install");
+    // "mylock.txt" is not a real lockfile, so it must not trigger the CI (frozen) path.
+    expect(planFromManifest(m({ dependencies: { express: "4" } }, ["mylock.txt"])).installCommand).toContain("npm install");
+  });
+
+  it("refuses an unsafe package.json main (no shell injection into the sandbox start cmd)", () => {
+    expect(planFromManifest(m({ main: "server.js; rm -rf /", dependencies: {} })).startCommand).toBeNull();
+    expect(planFromManifest(m({ main: "../../etc/passwd", dependencies: {} })).startCommand).toBeNull();
+    expect(planFromManifest(m({ main: "src/index.js", dependencies: {} })).startCommand).toBe("node src/index.js");
   });
 });
