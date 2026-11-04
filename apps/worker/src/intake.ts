@@ -32,6 +32,11 @@ export interface ResolvedRepo {
 
 const API = "https://api.github.com";
 const UA = "VibeAudit";
+/** Hosts the tarball download may touch. GitHub redirects api -> codeload; nothing else. */
+const ALLOWED_TARBALL_HOSTS = new Set(["api.github.com", "codeload.github.com", "objects.githubusercontent.com"]);
+const MAX_REDIRECTS = 5;
+/** Cap ref probes so a deeply-nested path can't fan out into many API calls (rate limit). */
+const MAX_REF_CANDIDATES = 10;
 
 function headers(token?: string): Record<string, string> {
   const h: Record<string, string> = {
@@ -106,7 +111,7 @@ export async function resolveRepo(ref: GitHubRepoRef, opts: IntakeOptions = {}):
     if (!body.default_branch) throw new IntakeError("repository has no default branch", "not_found");
     resolvedRef = body.default_branch;
   } else {
-    const candidates = refCandidates(ref);
+    const candidates = refCandidates(ref).slice(0, MAX_REF_CANDIDATES);
     let found: string | undefined;
     for (const cand of candidates) {
       if (await refExists(ref, cand, opts)) {
@@ -132,6 +137,36 @@ export async function resolveRepo(ref: GitHubRepoRef, opts: IntakeOptions = {}):
   };
 }
 
+/**
+ * Fetch the tarball, following redirects by hand so token safety is explicit, not reliant on
+ * undici internals: each hop's host must be on ALLOWED_TARBALL_HOSTS, the Authorization header
+ * is sent only to api.github.com (GitHub hands codeload a signed URL, no header needed), and
+ * the hop count is capped. A redirect anywhere else is refused.
+ */
+async function fetchTarballFollowing(startUrl: string, opts: IntakeOptions): Promise<Response> {
+  const f = opts.fetchImpl ?? fetch;
+  let current = startUrl;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const host = new URL(current).hostname;
+    if (!ALLOWED_TARBALL_HOSTS.has(host)) throw new IntakeError(`refusing tarball redirect to ${host}`, "network");
+    const token = host === "api.github.com" ? opts.token : undefined;
+    const res = await f(current, { headers: headers(token), redirect: "manual", signal: opts.signal });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      res.body?.cancel().catch(() => {});
+      if (!loc) throw new IntakeError("redirect without location", "network");
+      const next = new URL(loc, current);
+      if (next.protocol !== "https:" && next.protocol !== "http:") {
+        throw new IntakeError(`refusing redirect to ${next.protocol}`, "network");
+      }
+      current = next.toString();
+      continue;
+    }
+    return res;
+  }
+  throw new IntakeError("too many redirects", "network");
+}
+
 export interface TarballStream {
   /** Node Readable of the gzipped tar bytes. Pipe straight to the sandbox; do not open on VM 1. */
   stream: Readable;
@@ -145,19 +180,18 @@ export interface TarballStream {
  * VM 1 or the sandbox host. The caller pipes `stream` to VM 2 and awaits `done`.
  */
 export async function openTarball(resolved: ResolvedRepo, opts: IntakeOptions = {}): Promise<TarballStream> {
-  const f = opts.fetchImpl ?? fetch;
   const maxBytes = opts.maxBytes ?? MAX_GITHUB_TARBALL_BYTES;
-  const res = await f(resolved.tarballUrl, {
-    headers: headers(opts.token),
-    redirect: "follow",
-    signal: opts.signal,
-  });
-  if (!res.ok) throwForStatus(res);
+  const res = await fetchTarballFollowing(resolved.tarballUrl, opts);
+  if (!res.ok) {
+    res.body?.cancel().catch(() => {});
+    throwForStatus(res);
+  }
   if (!res.body) throw new IntakeError("empty tarball response", "network");
 
   // Trust the header only as an early reject; the real enforcement is the running count.
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
+    res.body.cancel().catch(() => {});
     throw new IntakeError(`tarball too large (${declared} bytes)`, "too_large");
   }
 
@@ -168,6 +202,12 @@ export async function openTarball(resolved: ResolvedRepo, opts: IntakeOptions = 
     resolveDone = res2;
     rejectDone = rej;
   });
+
+  // The stream's 'error' and this promise are two failure channels; attach an internal
+  // no-op so a caller that handles the stream but doesn't await `done` can't turn a
+  // too_large/abort into an unhandled rejection that would crash the VM 1 worker. The
+  // returned promise still rejects for callers who do await it.
+  done.catch(() => {});
 
   const source = res.body.getReader();
   const stream = new Readable({

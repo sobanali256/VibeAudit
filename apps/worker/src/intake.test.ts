@@ -101,6 +101,46 @@ describe("openTarball", () => {
     await expect(openTarball(resolved, { fetchImpl, maxBytes: 100 })).rejects.toMatchObject({ code: "too_large" });
   });
 
+  it("follows an allowed redirect (api -> codeload) and drops the token off github api", async () => {
+    const body = new Uint8Array(50).fill(3);
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("api.github.com")) {
+        expect((init!.headers as Record<string, string>).Authorization).toBe("Bearer ghp_x");
+        return new Response(null, { status: 302, headers: { location: "https://codeload.github.com/a/b/legacy.tar.gz/main" } });
+      }
+      // codeload hop must NOT carry the token
+      expect((init!.headers as Record<string, string>).Authorization).toBeUndefined();
+      const stream = new ReadableStream({ start(c) { c.enqueue(body); c.close(); } });
+      return new Response(stream, { status: 200 });
+    }) as unknown as typeof fetch;
+    const { stream, done } = await openTarball(resolved, { fetchImpl, token: "ghp_x" });
+    for await (const _ of stream) { /* drain */ }
+    expect(await done).toBe(50);
+  });
+
+  it("refuses a redirect to a disallowed host", async () => {
+    const fetchImpl = stubFetch([{ match: "/tarball/", status: 302, headers: { location: "http://169.254.169.254/" } }]);
+    await expect(openTarball(resolved, { fetchImpl })).rejects.toMatchObject({ code: "network" });
+  });
+
+  it("does not become an unhandled rejection when done is ignored", async () => {
+    let unhandled: unknown;
+    const onUnhandled = (e: unknown) => { unhandled = e; };
+    process.on("unhandledRejection", onUnhandled);
+    const { stream } = await openTarball(resolved, {
+      fetchImpl: stubFetch([{ match: "/tarball/", body: new Uint8Array(500).fill(1) }]),
+      maxBytes: 100,
+    });
+    await new Promise<void>((resolve) => {
+      stream.on("error", () => resolve());
+      stream.resume();
+    });
+    await new Promise((r) => setTimeout(r, 50)); // let any microtask rejection surface
+    process.off("unhandledRejection", onUnhandled);
+    expect(unhandled).toBeUndefined();
+  });
+
   it("aborts mid-stream when the running count passes the cap", async () => {
     const body = new Uint8Array(500).fill(1); // no content-length header
     const { stream, done } = await openTarball(resolved, { fetchImpl: stubFetch([{ match: "/tarball/", body }]), maxBytes: 100 });
