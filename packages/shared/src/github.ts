@@ -1,8 +1,28 @@
 export interface GitHubRepoRef {
   owner: string;
   repo: string;
-  /** Branch, tag or commit SHA when the URL names one (`/tree/<ref>`). */
+  /**
+   * Branch, tag or commit SHA when the URL names one (`/tree/<ref>`, `/blob/<ref>`,
+   * `/commit/<sha>`). This is the FIRST path segment after the keyword: GitHub URLs
+   * can't tell `tree/feature/x` (branch "feature/x") from `tree/feature/x` (branch
+   * "feature", dir "x"), so intake must try longer candidates via `refCandidates`
+   * against the branches API when this ref doesn't resolve.
+   */
   ref?: string;
+  /** Remaining path after `ref`, e.g. `src/app` in `/tree/main/src/app`. */
+  subpath?: string;
+}
+
+/**
+ * Every possible split of `ref` + `subpath` into a ref, longest first, e.g.
+ * `feature/x/src` → `["feature/x/src", "feature/x", "feature"]`.
+ */
+export function refCandidates(r: GitHubRepoRef): string[] {
+  if (!r.ref) return [];
+  const parts = [r.ref, ...(r.subpath ? r.subpath.split("/") : [])];
+  const out: string[] = [];
+  for (let n = parts.length; n >= 1; n--) out.push(parts.slice(0, n).join("/"));
+  return out;
 }
 
 // GitHub rules: owner is 1-39 alphanumerics or single hyphens; repo is [A-Za-z0-9._-]{1,100}.
@@ -22,6 +42,10 @@ const REF_RE = /^[A-Za-z0-9._\/-]{1,200}$/;
 export function parseGitHubUrl(input: string): GitHubRepoRef | null {
   const raw = input.trim();
   if (!raw || raw.length > 500) return null;
+  // Backslashes, whitespace and control chars get normalised away or turned into "/"
+  // by WHATWG URL parsing (`evil/x\..\..\vercel\next.js` resolves to vercel/next.js),
+  // so reject them before anything else looks at the string.
+  if (/[\s\\\u0000-\u001f\u007f]/.test(raw)) return null;
   // Reject dot segments (raw or percent-encoded) up front: WHATWG URL parsing would
   // silently resolve them and point at a different repo than the user typed.
   if (/(^|[\/:])(\.|%2e){1,2}(?=[\/?#]|$)/i.test(raw)) return null;
@@ -58,10 +82,14 @@ export function parseGitHubUrl(input: string): GitHubRepoRef | null {
 
   if (segments.length === 2) return { owner, repo };
 
-  if (segments[2] === "tree" && segments.length >= 4) {
-    const ref = segments.slice(3).join("/");
-    if (!REF_RE.test(ref) || ref.split("/").some((s) => s === "." || s === "..")) return null;
-    return { owner, repo, ref };
+  if (["tree", "blob", "commit"].includes(segments[2]!)) {
+    if (segments.length < 4) return null;
+    const rest = segments.slice(3);
+    if (rest.some((s) => s === "." || s === ".." || !REF_RE.test(s))) return null;
+    const ref = rest[0]!;
+    const subpath = rest.slice(1).join("/");
+    if (subpath.length > 200) return null;
+    return subpath ? { owner, repo, ref, subpath } : { owner, repo, ref };
   }
 
   // Other sub-pages (issues, blob, pulls, ...): still the same repo, default branch.
