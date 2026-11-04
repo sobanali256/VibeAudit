@@ -23,6 +23,8 @@ import {
   type Sql,
 } from "@vibeaudit/db";
 import { type Plan, planFromManifest } from "./planner";
+import { collectSources, llmReview } from "./review";
+import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { clearProxyState, writeProxyState } from "./proxy-state";
@@ -34,6 +36,8 @@ export interface PipelineDeps {
   proxyUrl: string;
   token?: string;
   appImage?: string;
+  /** LLM client for the static review stage. Absent = skip the LLM review. */
+  llm?: LlmClient;
   /** Poll interval while waiting for the human approval decision. */
   approvalPollMs?: number;
 }
@@ -130,6 +134,22 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     }
     const ignoreScripts = decision.decision === "approve" ? decision.ignoreScripts : true;
     const testKeys = decision.decision === "approve" ? await getSecrets(sql, id) : {};
+
+    // --- static: review the repo source (before install, so no node_modules noise). Always
+    // runs, even for a static-only audit. Best effort: a review failure never fails the audit. ---
+    await enter("static");
+    if (deps.llm) {
+      try {
+        const sources = await collectSources(sandbox, image, id);
+        const llmFindings = await llmReview(sources, deps.llm);
+        findings.push(...llmFindings);
+        await ev(sql, id, "log", { stage: "static", msg: `LLM review: ${llmFindings.length} finding(s) from ${sources.length} file(s)` });
+      } catch (e) {
+        await ev(sql, id, "log", { stage: "static", msg: `static review skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
+      }
+    } else {
+      await ev(sql, id, "log", { stage: "static", msg: "static review: no LLM configured" });
+    }
 
     if (!staticOnly) {
       // --- install (read-only egress: registries, GET/HEAD only) ---

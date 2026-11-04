@@ -2,12 +2,15 @@ import { MAX_CONCURRENT_AUDITS, QUEUED_MAX_AGE_MS, WORKER_LEASE_MS } from "@vibe
 import { CHANNEL_QUEUE, type Sql, claimNextAudit, failStaleAudits } from "@vibeaudit/db";
 import { Sandbox, cliDocker } from "./sandbox";
 import { runAudit } from "./pipeline";
+import type { LlmClient } from "./llm";
 
 export interface LoopConfig {
   sql: Sql;
   dockerHost: string;
   proxyUrl: string;
   githubToken?: string;
+  /** LLM client for the static review stage (optional). */
+  llm?: LlmClient;
   /** Fallback poll even without a NOTIFY (also drives the stale-audit sweep). */
   pollMs?: number;
 }
@@ -39,7 +42,7 @@ export async function runLoop(cfg: LoopConfig): Promise<() => Promise<void>> {
         if (!audit) break;
         console.log(`[worker] running audit ${audit.id}`);
         const sandbox = new Sandbox(audit.id, cfg.proxyUrl, cliDocker(cfg.dockerHost));
-        await runAudit(audit, { sql, sandbox, proxyUrl: cfg.proxyUrl, token: cfg.githubToken });
+        await runAudit(audit, { sql, sandbox, proxyUrl: cfg.proxyUrl, token: cfg.githubToken, llm: cfg.llm });
         console.log(`[worker] finished audit ${audit.id}`);
       }
     } finally {

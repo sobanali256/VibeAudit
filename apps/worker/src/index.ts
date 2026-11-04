@@ -2,6 +2,7 @@ import { AUDIT_STAGES } from "@vibeaudit/shared";
 import { createDb, migrate } from "@vibeaudit/db";
 import { loadConfig } from "./config";
 import { runLoop } from "./loop";
+import { createLlm } from "./llm";
 import { clearProxyState } from "./proxy-state";
 
 // Entry point for the audit worker (runs on VM 1). It consumes the job queue and drives the
@@ -16,11 +17,18 @@ async function main() {
     `[worker] starting; sandbox=${config.SANDBOX_DOCKER_HOST} migrations=${applied.length ? applied.join(",") : "up-to-date"} stages=${AUDIT_STAGES.join(" > ")}`,
   );
 
+  const llm = createLlm({
+    baseUrl: config.VULTR_INFERENCE_BASE_URL,
+    apiKey: config.VULTR_INFERENCE_API_KEY,
+    model: config.PLANNER_MODEL,
+  });
+
   const stop = await runLoop({
     sql,
     dockerHost: config.SANDBOX_DOCKER_HOST,
     proxyUrl: config.SANDBOX_PROXY_URL,
     githubToken: config.GITHUB_TOKEN,
+    llm,
   });
 
   const shutdown = async (sig: string) => {
