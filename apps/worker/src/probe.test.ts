@@ -74,6 +74,23 @@ describe("probe", () => {
     expect(findings.find((f) => f.id === "f-cors")).toBeUndefined();
   });
 
+  it("does not flag /api/chat on a non-response (timeout / connection failure, http_code 000)", async () => {
+    const findings = await runProbe((path, method) =>
+      path === "/api/chat" && method === "POST" ? { code: 28, stdout: "\n__VA_STATUS__:000", stderr: "", timedOut: true } : undefined,
+    );
+    expect(findings.find((f) => f.id === "f-chat")).toBeUndefined();
+  });
+
+  it("keeps the body intact when it contains a blank line", async () => {
+    const findings = await runProbe((path) =>
+      path === "/api/debug" ? ok(200, [], "line one\n\nline two with env and process") : undefined,
+    );
+    const debug = findings.find((f) => f.id === "f-debug");
+    expect(debug).toBeDefined();
+    const ev = debug!.evidence[0]!;
+    expect(ev.kind === "http" && ev.bodyExcerpt).toContain("line two");
+  });
+
   it("keeps collecting after one probe throws", async () => {
     const findings = await runProbe((path) => {
       if (path === "/api/users") throw new Error("network blip");

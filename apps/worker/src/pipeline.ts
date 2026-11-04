@@ -188,8 +188,10 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         } else {
           await enter("dynamic");
           // Cap dynamic probing by the remaining run budget; whatever we have is still reported.
+          // probe() must never reject the race: the loser keeps running after a timeout, so a
+          // late rejection would have no awaiter and crash the worker as an unhandledRejection.
           await Promise.race([
-            probe(sandbox, id, ip, plan.port ?? 3000, findings, sql),
+            probe(sandbox, id, ip, plan.port ?? 3000, findings, sql).catch(() => {}),
             new Promise((r) => setTimeout(r, Math.max(1000, runDeadline - Date.now()))),
           ]);
         }
@@ -414,7 +416,8 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
       await fn();
     } catch (e) {
       results[label] = -1;
-      await ev(sql, id, "log", { stage: "dynamic", msg: `probe ${label} errored: ${String((e as Error)?.message ?? e).slice(0, 200)}` });
+      // Logging is best-effort: a DB blip here must not turn into an unhandled rejection.
+      await ev(sql, id, "log", { stage: "dynamic", msg: `probe ${label} errored: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
     }
   };
 
@@ -466,7 +469,9 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
   await safe("chat", async () => {
     const chat = await call("/api/chat", { method: "POST", headers: ["Content-Type: application/json"], data: '{"message":"ping"}' });
     results.chat = chat.status;
-    if (chat.status !== 404 && chat.status !== 401 && chat.status !== 403) {
+    // A real HTTP response that wasn't an auth gate or a 404. `status >= 200` excludes 0, which
+    // the parser produces for a timeout / no response (curl %{http_code}=000) — never a finding.
+    if (chat.status >= 200 && chat.status !== 404 && chat.status !== 401 && chat.status !== 403) {
       findings.push(mkFinding("f-chat", "high", "missing_auth", "AI proxy endpoint has no authentication or rate limit",
         "POST /api/chat forwards to a paid upstream API without requiring any auth, so anyone can run up the bill against the server's key.", true,
         [{ kind: "http", method: "POST", url: "/api/chat", status: chat.status, bodyExcerpt: chat.body.slice(0, 200) }], "probe"));
@@ -495,7 +500,7 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
     }
   });
 
-  await ev(sql, id, "log", { stage: "dynamic", msg: `probed ${Object.entries(results).map(([k, v]) => `${k} (${v})`).join(", ")}` });
+  await ev(sql, id, "log", { stage: "dynamic", msg: `probed ${Object.entries(results).map(([k, v]) => `${k} (${v})`).join(", ")}` }).catch(() => {});
 }
 
 function mkFinding(id: string, severity: Finding["severity"], category: Finding["category"], title: string, description: string, confirmed: boolean, evidence: Finding["evidence"], source: Finding["source"]): Finding {
