@@ -75,6 +75,27 @@ systemctl daemon-reload
 systemctl enable docker >/dev/null 2>&1
 systemctl restart docker
 
+# --- Size-capped workspace filesystem ----------------------------------------
+# The worker only has Docker-API access to this host (the ssh key is forced to
+# `docker system dial-stdio`), so it cannot set a disk quota itself. We give it a fixed-size
+# ext4 on a loop image, mounted at WS_MOUNT, and the worker bind-mounts a per-audit subdir.
+# With one audit at a time this caps a single audit's on-disk workspace (a hostile install
+# that tries to fill the disk hits ENOSPC inside its own fs, not the host's). 1000:1000 is
+# the in-container audit user. rootfs writes are already bounded by --overlay2=root:memory.
+WS_SIZE_GB="${WS_SIZE_GB:-12}"
+WS_IMG=/srv/vibeaudit/ws.img
+WS_MOUNT=/srv/vibeaudit/ws
+install -d -m 755 /srv/vibeaudit
+if [ ! -f "$WS_IMG" ]; then
+  fallocate -l "${WS_SIZE_GB}G" "$WS_IMG" || dd if=/dev/zero of="$WS_IMG" bs=1M count=$((WS_SIZE_GB*1024))
+  mkfs.ext4 -q -m 0 -O ^has_journal "$WS_IMG"   # no journal: it's scratch, destroyed per audit
+fi
+install -d -m 755 "$WS_MOUNT"
+grep -q "$WS_IMG" /etc/fstab || echo "$WS_IMG $WS_MOUNT ext4 loop,nosuid,nodev,noexec,noatime 0 0" >> /etc/fstab
+mountpoint -q "$WS_MOUNT" || mount "$WS_MOUNT"
+# The audit user owns the contents; the worker makes/removes per-audit subdirs via a container.
+chown 1000:1000 "$WS_MOUNT"; chmod 1770 "$WS_MOUNT"
+
 # --- Host ufw: SSH only on the public NIC (Vultr fw limits it to the admin IP) and
 #     from VM 1 over the VPC. Nothing else inbound. Add new rules before deleting old.
 ufw allow in on "$PUB_IF" to any port 22 proto tcp comment 'admin ssh (Vultr fw restricts source)' >/dev/null

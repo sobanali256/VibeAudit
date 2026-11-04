@@ -57,6 +57,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@vibeaudit/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@vibeaudit/shared':
         specifier: workspace:*
         version: link:../../packages/shared

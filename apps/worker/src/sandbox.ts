@@ -1,0 +1,192 @@
+import { execFile } from "node:child_process";
+import type { Readable } from "node:stream";
+import {
+  AUDIT_ID_RE,
+  AUDIT_LABEL,
+  type ContainerRole,
+  WORKSPACE_MOUNT,
+  containerArgs,
+} from "@vibeaudit/shared";
+
+/**
+ * Thin, injection-safe wrapper around the Docker CLI pointed at VM 2 (the sandbox host) over
+ * SSH. The worker holds only `docker system dial-stdio` access to VM 2, so EVERYTHING here is
+ * a Docker API call: no host commands run on VM 2. Repo code only ever runs via `run()` under
+ * runsc with the flags from containerArgs().
+ *
+ * One Sandbox instance == one audit. setup() then run()s then teardown(), which the pipeline
+ * calls in a finally so containers/network/workspace never outlive the audit.
+ */
+
+const SETUP_IMAGE = "busybox:1.37";
+const WS_HOST_ROOT = "/srv/vibeaudit/ws"; // the size-capped fs created by infra/sbx/setup.sh
+const MAX_OUTPUT = 256 * 1024; // per-exec stdout/stderr cap (logs are evidence, not bulk data)
+
+export interface ExecResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+/** A docker command runner. Default shells out to the real CLI; tests inject a fake. */
+export type DockerExec = (args: string[], opts?: { input?: Readable; timeoutMs?: number }) => Promise<ExecResult>;
+
+export function cliDocker(dockerHost: string): DockerExec {
+  const base = ["-H", dockerHost];
+  return (args, opts = {}) =>
+    new Promise((resolve, reject) => {
+      const child = execFile(
+        "docker",
+        [...base, ...args],
+        { maxBuffer: MAX_OUTPUT, timeout: opts.timeoutMs ?? 0, killSignal: "SIGKILL" },
+        (err, stdout, stderr) => {
+          const timedOut = !!(err && (err as NodeJS.ErrnoException & { killed?: boolean }).killed && opts.timeoutMs);
+          if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return reject(err); // docker not installed
+          resolve({
+            code: typeof (err as { code?: number })?.code === "number" ? (err as { code: number }).code : err ? 1 : 0,
+            stdout: stdout.toString(),
+            stderr: stderr.toString(),
+            timedOut,
+          });
+        },
+      );
+      if (opts.input) {
+        opts.input.pipe(child.stdin!);
+        opts.input.on("error", () => child.kill("SIGKILL"));
+      }
+    });
+}
+
+export interface RunSpec {
+  role: ContainerRole;
+  image: string;
+  /** argv passed to the container (no shell unless you invoke one explicitly). */
+  cmd: string[];
+  env?: Record<string, string>;
+  timeoutMs: number;
+  /** name->ip pins (e.g. the app container's IP for the browser container). */
+  hosts?: Record<string, string>;
+  /** stable container name (so we can look up its IP); defaults to role-based. */
+  name?: string;
+  /** stream piped to the container's stdin (e.g. the repo tarball into `tar -x`). */
+  input?: Readable;
+  /** read-only stages (install/build) run GET/HEAD-only; this just tags the proxy stage. */
+}
+
+export class Sandbox {
+  readonly network: string;
+  readonly workspaceHostPath: string;
+  private tornDown = false;
+
+  constructor(
+    readonly auditId: string,
+    private readonly proxyUrl: string,
+    private readonly docker: DockerExec,
+  ) {
+    if (!AUDIT_ID_RE.test(auditId)) throw new Error("invalid audit id");
+    this.network = `va-${auditId}`;
+    this.workspaceHostPath = `${WS_HOST_ROOT}/${auditId}`;
+  }
+
+  /** Create the per-audit network and workspace subdir (owned by the in-container user). */
+  async setup(): Promise<void> {
+    // NOT --internal: the container must still reach the VM 1 proxy (off-bridge). The
+    // DOCKER-USER egress lock is the control — it allows only tcp to the proxy and drops
+    // the rest. An internal network would block the proxy too and break all egress.
+    const net = await this.docker(["network", "create", "--label", `${AUDIT_LABEL}=${this.auditId}`, this.network]);
+    if (net.code !== 0 && !/already exists/.test(net.stderr)) {
+      throw new SandboxError(`network create failed: ${net.stderr.trim()}`);
+    }
+    const mk = await this.docker([
+      "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
+      "-v", `${WS_HOST_ROOT}:/ws`, "--user", "0:0", SETUP_IMAGE,
+      "sh", "-c",
+      `mkdir -p /ws/${this.auditId}/app /ws/${this.auditId}/home /ws/${this.auditId}/.cache && chown -R 1000:1000 /ws/${this.auditId}`,
+    ], { timeoutMs: 30_000 });
+    if (mk.code !== 0) throw new SandboxError(`workspace create failed: ${mk.stderr.trim()}`);
+  }
+
+  async run(spec: RunSpec): Promise<ExecResult> {
+    const name = spec.name ?? `va-${this.auditId}-${spec.role}`;
+    const args = [
+      "run", "--rm", spec.input ? "-i" : "--init",
+      ...containerArgs({
+        auditId: this.auditId,
+        role: spec.role,
+        network: this.network,
+        proxyUrl: this.proxyUrl,
+        workspaceHostPath: spec.role === "app" ? this.workspaceHostPath : undefined,
+        hosts: spec.hosts,
+        name,
+      }),
+    ];
+    for (const [k, v] of Object.entries(spec.env ?? {})) args.push(`--env=${k}=${v}`);
+    args.push(spec.image, ...spec.cmd);
+    return this.docker(args, { input: spec.input, timeoutMs: spec.timeoutMs });
+  }
+
+  /** Start a long-running container (the app server) detached. Returns its name. */
+  async start(spec: Omit<RunSpec, "input" | "timeoutMs">): Promise<string> {
+    const name = spec.name ?? `va-${this.auditId}-${spec.role}`;
+    const args = [
+      "run", "-d", "--init",
+      ...containerArgs({
+        auditId: this.auditId,
+        role: spec.role,
+        network: this.network,
+        proxyUrl: this.proxyUrl,
+        workspaceHostPath: spec.role === "app" ? this.workspaceHostPath : undefined,
+        hosts: spec.hosts,
+        name,
+      }),
+    ];
+    for (const [k, v] of Object.entries(spec.env ?? {})) args.push(`--env=${k}=${v}`);
+    args.push(spec.image, ...spec.cmd);
+    const r = await this.docker(args, { timeoutMs: 60_000 });
+    if (r.code !== 0) throw new SandboxError(`start failed: ${r.stderr.trim()}`);
+    return name;
+  }
+
+  async logs(name: string, tail = 200): Promise<string> {
+    const r = await this.docker(["logs", "--tail", String(tail), name]);
+    return (r.stdout + r.stderr).slice(-MAX_OUTPUT);
+  }
+
+  /** The container's IPv4 on the audit network (to pin as a host for the browser container). */
+  async ipOf(name: string): Promise<string | null> {
+    const r = await this.docker([
+      "inspect", "-f", `{{.NetworkSettings.Networks.${this.network}.IPAddress}}`, name,
+    ]);
+    const ip = r.stdout.trim();
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
+  }
+
+  /** Remove everything this audit created. Safe to call more than once; never throws. */
+  async teardown(): Promise<void> {
+    if (this.tornDown) return;
+    this.tornDown = true;
+    try {
+      const ids = await this.docker(["ps", "-aq", "--filter", `label=${AUDIT_LABEL}=${this.auditId}`]);
+      const list = ids.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (list.length) await this.docker(["rm", "-f", ...list]);
+      await this.docker(["network", "rm", this.network]);
+      await this.docker([
+        "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
+        "-v", `${WS_HOST_ROOT}:/ws`, "--user", "0:0", SETUP_IMAGE,
+        "rm", "-rf", `/ws/${this.auditId}`,
+      ], { timeoutMs: 30_000 });
+    } catch {
+      // Teardown is best-effort; the janitor is the backstop.
+    }
+  }
+}
+
+export class SandboxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SandboxError";
+  }
+}
+
+export { WORKSPACE_MOUNT };

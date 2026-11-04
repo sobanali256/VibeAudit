@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@vibeaudit/shared": "workspace:*",
-    "zod": "^4"
+    "zod": "^4",
+    "@vibeaudit/db": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22",
