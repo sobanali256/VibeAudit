@@ -196,6 +196,8 @@ function Containment({ entries }: { entries: ContainmentEntry[] }) {
     else limitsHit++;
   }
   const allowedRequests = allowed.reduce((n, e) => n + (e.repeat ?? 1), 0);
+  // Past 20 identical requests the proxy logs only every 100th, so big counts are lower bounds.
+  const approx = allowed.some((e) => (e.repeat ?? 1) > 20);
 
   return (
     <div className="flex flex-col gap-3">
@@ -211,6 +213,7 @@ function Containment({ entries }: { entries: ContainmentEntry[] }) {
             {limitsHit ? <Chip cls="bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200">{limitsHit} limit{limitsHit === 1 ? "" : "s"} hit</Chip> : null}
             {allowedRequests ? (
               <Chip cls="bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                {approx ? "at least " : ""}
                 {allowedRequests} allowed request{allowedRequests === 1 ? "" : "s"} to {new Set(allowed.map((e) => e.host)).size} host(s)
               </Chip>
             ) : null}
@@ -255,7 +258,11 @@ function Containment({ entries }: { entries: ContainmentEntry[] }) {
                   <li key={i}>
                     <span className="text-zinc-500">{e.stage ?? "-"}</span> {e.method ?? ""} {e.host}
                     {e.keyVar ? <span className="text-emerald-700 dark:text-emerald-400"> (test key {e.keyVar} swapped in)</span> : null}
-                    <span className="text-zinc-500"> ×{e.repeat ?? 1}</span>
+                    <span className="text-zinc-500">
+                      {" "}
+                      ×{e.repeat ?? 1}
+                      {(e.repeat ?? 1) > 20 ? "+" : ""}
+                    </span>
                   </li>
                 ))}
               </ul>
