@@ -132,7 +132,10 @@ export async function llmReview(files: SourceFile[], llm: LlmClient): Promise<Fi
   if (files.length === 0) return [];
   let raw: string;
   try {
-    raw = await llm.complete({ system: SYSTEM_PROMPT, user: buildUserPrompt(files), maxTokens: 1800 });
+    // glm-5.3 is a reasoning model: it spends most of the completion budget on message.reasoning
+    // before emitting the JSON in message.content. Too small a cap => it stops mid-reasoning with
+    // empty content (finish_reason=length) and we get zero findings. Give it ample headroom.
+    raw = await llm.complete({ system: SYSTEM_PROMPT, user: buildUserPrompt(files), maxTokens: 8000, timeoutMs: 90_000 });
   } catch {
     return [];
   }
