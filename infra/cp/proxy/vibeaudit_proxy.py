@@ -85,10 +85,12 @@ EVENTS_MAX_BYTES = 256 << 20      # stop logging "allowed" events past this size
 EVENT_BURST = 20                  # identical events logged before sampling kicks in
 EVENT_SAMPLE = 100                # ...then every Nth occurrence, with a count
 
-HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
 AUDIT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 HEADER_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+# Secrets and canaries: printable ASCII, no spaces, 8-512 chars (same rule as shared/ids.ts).
+SECRET_VALUE_RE = re.compile(r"^[\x21-\x7e]{8,512}$")
 
 
 @dataclass
@@ -157,25 +159,29 @@ def _canary_forms(c: str) -> list[tuple[str, str]]:
 def _parse_state(raw: dict) -> State:
     audit_id = raw["auditId"]
     stage = raw["stage"]
-    if not isinstance(audit_id, str) or not AUDIT_ID_RE.match(audit_id):
+    if not isinstance(audit_id, str) or not AUDIT_ID_RE.fullmatch(audit_id):
         raise ValueError("bad auditId")
     if not isinstance(stage, str):
         raise ValueError("bad stage")
     keys = []
     for var, spec in (raw.get("keys") or {}).items():
-        if not VAR_RE.match(var):
+        if not VAR_RE.fullmatch(var):
             raise ValueError(f"bad key var {var!r}")
         value = spec["value"]
         hosts = frozenset(_norm_host(h) for h in spec["hosts"])
         headers = frozenset(h.lower() for h in spec.get("headers") or DEFAULT_KEY_HEADERS)
-        if not isinstance(value, str) or len(value) < 8 or any(ch.isspace() for ch in value):
+        if not isinstance(value, str) or not SECRET_VALUE_RE.fullmatch(value):
             raise ValueError(f"bad key value for {var}")
-        if not hosts or not all(HOST_RE.match(h) for h in hosts):
+        if not hosts or not all(HOST_RE.fullmatch(h) for h in hosts):
             raise ValueError(f"bad hosts for {var}")
-        if not headers or not all(HEADER_RE.match(h) for h in headers):
+        if not headers or not all(HEADER_RE.fullmatch(h) for h in headers):
             raise ValueError(f"bad headers for {var}")
         keys.append(Key(var, value, hosts, headers, f"sk-PLACEHOLDER-{var}-{audit_id}"))
-    canaries = [c for c in (raw.get("canaries") or []) if isinstance(c, str) and len(c) >= 8]
+    if keys and stage not in KEY_STAGES:
+        raise ValueError(f"test keys are not allowed in stage {stage}")
+    canaries = raw.get("canaries") or []
+    if not isinstance(canaries, list) or not all(isinstance(c, str) and SECRET_VALUE_RE.fullmatch(c) for c in canaries):
+        raise ValueError("bad canaries")  # reject, don't silently drop: a dropped canary = unmonitored
     forms = [f for c in canaries for f in _canary_forms(c)]
     return State(audit_id, stage, keys, canaries, forms)
 

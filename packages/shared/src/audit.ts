@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AUDIT_ID_RE, ENV_VAR_RE, KEY_PROVIDERS, SECRET_VALUE_RE } from "./ids";
 
 /** Pipeline stages, in order. The proxy allowlist is keyed on these too. */
 export const AUDIT_STAGES = [
@@ -54,3 +55,85 @@ export const AUDIT_TIMEOUT_MS = 20 * 60_000;
 /** Intake limits (zip-bomb / abuse protection). */
 export const MAX_ARCHIVE_BYTES = 20 * 1024 * 1024;
 export const MAX_UNPACKED_BYTES = 200 * 1024 * 1024;
+
+/** GitHub tarball intake gets the same caps as zip uploads. */
+export const MAX_GITHUB_TARBALL_BYTES = MAX_ARCHIVE_BYTES;
+/** Entry-count cap for any archive (zip or tarball), against inode-exhaustion bombs. */
+export const MAX_ARCHIVE_ENTRIES = 50_000;
+
+/**
+ * VM 2 runs one audit at a time (2 vCPU / 8 GB). Extra audits wait in the queue.
+ * The egress proxy also has a single state file (one active audit): raising this needs a
+ * per-audit proxy contract first.
+ */
+export const MAX_CONCURRENT_AUDITS = 1;
+/** The janitor force-removes any audit container or network older than this. */
+export const JANITOR_MAX_AGE_MS = 30 * 60_000;
+/** Label put on every container/network/volume the worker creates, for the janitor. */
+export const AUDIT_LABEL = "vibeaudit.audit";
+
+/**
+ * Human-approval step (between `plan` and the first stage that runs repo code).
+ * The worker parks the audit in `awaiting_approval` with this request and waits.
+ */
+export const ApprovalRequest = z.object({
+  auditId: z.string().regex(AUDIT_ID_RE),
+  /** Changes whenever the request is regenerated; a decision must echo it. */
+  requestId: z.string().min(8),
+  /** What the planner intends to run, shown verbatim to the user. */
+  plan: z.object({
+    framework: z.enum(["nextjs", "vite", "express", "unknown"]),
+    packageManager: z.enum(["npm", "pnpm", "yarn", "bun"]),
+    installCommand: z.string(),
+    buildCommand: z.string().nullable(),
+    startCommand: z.string().nullable(),
+    port: z.number().int().positive().nullable(),
+  }),
+  /**
+   * Env vars the app reads, and what the sandbox gets for each. `placeholder` is only
+   * offered for vars in KEY_PROVIDERS; their hosts come from that table, not the planner.
+   */
+  env: z.array(
+    z
+      .object({
+        name: z.string().regex(ENV_VAR_RE),
+        provide: z.enum(["canary", "placeholder", "empty"]),
+      })
+      .refine((e) => e.provide !== "placeholder" || Object.hasOwn(KEY_PROVIDERS, e.name), {
+        message: "placeholder only for known key providers",
+      }),
+  ),
+  /** Install scripts (postinstall etc.) found in the dependency tree. */
+  installScripts: z.array(z.object({ pkg: z.string(), script: z.string() })),
+  expiresAt: z.string(),
+});
+export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
+
+/** The user's decision. Contains NO secrets, so it can be stored and shown freely. */
+export const ApprovalDecision = z.discriminatedUnion("decision", [
+  z.object({
+    decision: z.literal("approve"),
+    auditId: z.string().regex(AUDIT_ID_RE),
+    requestId: z.string().min(8),
+    /** Run with install scripts disabled (`--ignore-scripts`). */
+    ignoreScripts: z.boolean().default(false),
+    /** Env vars the user supplied a test key for (values travel separately). */
+    testKeyVars: z.array(z.string().regex(ENV_VAR_RE)).default([]),
+  }),
+  z.object({ decision: z.literal("static_only"), auditId: z.string().regex(AUDIT_ID_RE), requestId: z.string().min(8) }),
+  z.object({ decision: z.literal("cancel"), auditId: z.string().regex(AUDIT_ID_RE), requestId: z.string().min(8) }),
+]);
+export type ApprovalDecision = z.infer<typeof ApprovalDecision>;
+
+/**
+ * Real test keys, submitted with an approval. Kept apart from ApprovalDecision so they
+ * never land in audit rows, API responses, logs or progress events. Stored only on VM 1,
+ * used only to write proxy state, deleted when the audit ends.
+ */
+export const ApprovalSecrets = z.object({
+  testKeys: z.record(
+    z.string().regex(ENV_VAR_RE).refine((v) => Object.hasOwn(KEY_PROVIDERS, v), "unknown key provider"),
+    z.string().regex(SECRET_VALUE_RE, "8-512 printable ASCII chars, no spaces"),
+  ),
+});
+export type ApprovalSecrets = z.infer<typeof ApprovalSecrets>;

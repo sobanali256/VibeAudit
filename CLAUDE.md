@@ -46,6 +46,14 @@ There are two VMs on a Vultr VPC:
 - The only egress from sandbox containers is the mitmproxy on VM 1 (`<VM1-VPC-IP>:8080`), enforced by `DOCKER-USER` iptables rules. The proxy applies a per-stage host allowlist and swaps `sk-PLACEHOLDER-<VAR>-<auditId>` placeholders for real test keys on the wire.
 - Env vars inside sandboxes are canary stubs or placeholders, never real values. Only the proxy CA's *public* cert is mounted.
 - Every container gets CPU and memory caps, `--pids-limit`, `--cap-drop ALL`, `no-new-privileges`, a non-root user, and stage time caps. Containers and the audit network are destroyed after every audit, pass or fail. A janitor kills anything older than 30 minutes.
+- Repo code only ever runs via `docker run` under runsc (`BASE_CONTAINER_FLAGS` in `packages/shared/src/sandbox.ts`). **Never `docker build` a repo-controlled Dockerfile or context on VM 2**: BuildKit `RUN` steps use runc on the host kernel.
+- gVisor quirks that the worker relies on: the pids cap also counts sentry threads, so keep it ≥ 512. Docker's embedded DNS doesn't work, so wire container names with `--add-host`. The rootfs is memory-backed (`--overlay2=root:memory`), so the workspace needs its own size-capped volume.
+- On VM 1, three users keep powers apart:
+  - `vibedeploy` builds releases and holds no secrets.
+  - `vibeweb` runs the internet-facing app, sees only `/etc/vibeaudit/web.env`, and can't read the worker key or the proxy dir.
+  - `vibeaudit` runs the worker and holds the VM 2 docker key.
+  - Don't give the web more secrets or docker access.
+- The proxy contract (`ProxyState` and `ProxyEvent` in `sandbox.ts`) must stay in sync with `infra/cp/proxy/vibeaudit_proxy.py`. Run `infra/sbx/selftest.sh` and `infra/cp/proxy/selftest.sh` after any infra change.
 
 ## Git rules
 
