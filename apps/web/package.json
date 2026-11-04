@@ -10,10 +10,13 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
+    "@vibeaudit/db": "workspace:*",
     "@vibeaudit/shared": "workspace:*",
     "next": "16.4.4",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "server-only": "0.0.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
