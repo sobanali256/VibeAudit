@@ -19,23 +19,27 @@ const fs=require("fs"),path=require("path");
 const SKIP=new Set(["node_modules",".git","dist","build",".next","coverage",".cache","out","tmp"]);
 const EXT=new Set([".js",".jsx",".ts",".tsx",".mjs",".cjs",".html",".vue",".svelte"]);
 const MAXF=${COLLECT_LIMITS.perFileBytes},MAXT=${COLLECT_LIMITS.totalBytes},MAXN=${COLLECT_LIMITS.maxFiles};
+const MAXDEPTH=12,MAXSIZE=262144;
 let total=0;const out=[];
-function walk(d){
-  if(out.length>=MAXN||total>=MAXT)return;
+// NOTE: .env files are intentionally NOT collected — their contents would be sent to the
+// external inference host, and committed env files are already flagged by f-env / the secret scan.
+function walk(d,depth){
+  if(out.length>=MAXN||total>=MAXT||depth>MAXDEPTH)return;
   let ents;try{ents=fs.readdirSync(d,{withFileTypes:true})}catch{return}
   for(const e of ents){
     if(out.length>=MAXN||total>=MAXT)break;
     const p=path.join(d,e.name);
-    if(e.isDirectory()){if(!SKIP.has(e.name)&&!e.name.startsWith("."))walk(p);continue}
+    if(e.isDirectory()){if(!SKIP.has(e.name)&&!e.name.startsWith("."))walk(p,depth+1);continue}
     if(!e.isFile())continue;
-    const ext=path.extname(e.name).toLowerCase();
-    if(!EXT.has(ext)&&!/^\\.env/.test(e.name))continue;
+    if(!EXT.has(path.extname(e.name).toLowerCase()))continue;
+    let st;try{st=fs.statSync(p)}catch{continue}
+    if(st.size>MAXSIZE)continue;
     let c;try{c=fs.readFileSync(p,"utf8")}catch{continue}
     c=c.slice(0,MAXF);total+=c.length;
     out.push({path:path.relative(".",p),content:c});
   }
 }
-walk(".");
+walk(".",0);
 process.stdout.write(JSON.stringify(out));
 `;
 

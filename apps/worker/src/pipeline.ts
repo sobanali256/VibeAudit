@@ -148,7 +148,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         await ev(sql, id, "log", { stage: "static", msg: `static review skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
       }
     } else {
-      await ev(sql, id, "log", { stage: "static", msg: "static review: no LLM configured" });
+      await ev(sql, id, "log", { stage: "static", msg: "static review: no LLM configured" }).catch(() => {});
     }
 
     if (!staticOnly) {
@@ -529,8 +529,10 @@ function mkFinding(id: string, severity: Finding["severity"], category: Finding[
 
 const WEIGHT: Record<Finding["severity"], number> = { critical: 40, high: 20, medium: 10, low: 4, info: 0 };
 function scoreFrom(findings: Finding[]): number {
-  const penalty = findings.reduce((s, f) => s + WEIGHT[f.severity], 0);
-  return Math.max(0, 100 - penalty);
+  // Unconfirmed findings (static suspicion, e.g. LLM review) count at half weight, so a noisy
+  // or hallucinating static pass can't tank an otherwise-clean repo the way proven findings do.
+  const penalty = findings.reduce((s, f) => s + WEIGHT[f.severity] * (f.confirmed ? 1 : 0.5), 0);
+  return Math.max(0, Math.round(100 - penalty));
 }
 
 function tailLog(r: { stdout: string; stderr: string }): string {
