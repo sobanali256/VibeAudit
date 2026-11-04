@@ -183,17 +183,25 @@ export function containerArgs(i: ContainerArgsInput): string[] {
     `--shm-size=${CONTAINER_LIMITS.shmBytes[i.role]}`,
     `--network=${i.network}`,
     `--label=${AUDIT_LABEL}=${i.auditId}`,
-    `--volume=${PROXY_CA_PATH_HOST}:${PROXY_CA_PATH_CONTAINER}:ro`,
-    `--env=HTTP_PROXY=${i.proxyUrl}`,
-    `--env=HTTPS_PROXY=${i.proxyUrl}`,
-    `--env=http_proxy=${i.proxyUrl}`,
-    `--env=https_proxy=${i.proxyUrl}`,
-    "--env=NO_PROXY=localhost,127.0.0.1",
-    "--env=NODE_USE_ENV_PROXY=1",
-    `--env=NODE_EXTRA_CA_CERTS=${PROXY_CA_PATH_CONTAINER}`,
-    `--env=npm_config_cafile=${PROXY_CA_PATH_CONTAINER}`,
-    `--env=SSL_CERT_FILE=${PROXY_CA_PATH_CONTAINER}`,
   ];
+  // Only the app container routes egress through the proxy. The browser/probe container
+  // talks to the app DIRECTLY on the audit network, so it must NOT get *_PROXY (or curl/Node
+  // would send app requests to the proxy, which rejects the app's internal IP). Its external
+  // egress is still blocked at the network layer by the DOCKER-USER lock.
+  if (i.role === "app") {
+    args.push(
+      `--volume=${PROXY_CA_PATH_HOST}:${PROXY_CA_PATH_CONTAINER}:ro`,
+      `--env=HTTP_PROXY=${i.proxyUrl}`,
+      `--env=HTTPS_PROXY=${i.proxyUrl}`,
+      `--env=http_proxy=${i.proxyUrl}`,
+      `--env=https_proxy=${i.proxyUrl}`,
+      "--env=NO_PROXY=localhost,127.0.0.1",
+      "--env=NODE_USE_ENV_PROXY=1",
+      `--env=NODE_EXTRA_CA_CERTS=${PROXY_CA_PATH_CONTAINER}`,
+      `--env=npm_config_cafile=${PROXY_CA_PATH_CONTAINER}`,
+      `--env=SSL_CERT_FILE=${PROXY_CA_PATH_CONTAINER}`,
+    );
+  }
   if (i.name) args.push(`--name=${i.name}`);
   for (const [name, ip] of Object.entries(i.hosts ?? {})) {
     if (!/^[a-z0-9-]{1,63}$/.test(name) || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new Error("invalid host pin");

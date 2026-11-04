@@ -143,7 +143,6 @@ describe("containerArgs", () => {
       `--pids-limit=${CONTAINER_LIMITS.pids}`,
       "--network=va-a1",
       `--label=${AUDIT_LABEL}=a1`,
-      "--env=HTTPS_PROXY=http://10.1.96.4:8080",
     ]) {
       expect(args).toContain(f);
     }
@@ -153,6 +152,10 @@ describe("containerArgs", () => {
     expect(swap?.split("=")[1]).toBe(mem?.split("=")[1]);
     expect(args.some((a) => a.startsWith("--cpus="))).toBe(true);
     expect(args.some((a) => a.startsWith("--runtime=") && a !== "--runtime=runsc")).toBe(false);
+  });
+  it("only the app container routes through the proxy; browser talks to the app directly", () => {
+    expect(app).toContain("--env=HTTPS_PROXY=http://10.1.96.4:8080");
+    expect(browser.some((a) => /_PROXY=/i.test(a) && !a.startsWith("--env=NO_PROXY"))).toBe(false);
   });
   it("browser gets shm and host pins; app gets the workspace and cache dirs", () => {
     expect(browser).toContain("--add-host=app:172.30.0.2");
