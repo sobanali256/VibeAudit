@@ -156,8 +156,10 @@ export class Sandbox {
 
   /** The container's IPv4 on the audit network (to pin as a host for the browser container). */
   async ipOf(name: string): Promise<string | null> {
+    // `index` (not dotted access): the network name has hyphens, which a Go template
+    // field selector can't parse.
     const r = await this.docker([
-      "inspect", "-f", `{{.NetworkSettings.Networks.${this.network}.IPAddress}}`, name,
+      "inspect", "-f", `{{(index .NetworkSettings.Networks "${this.network}").IPAddress}}`, name,
     ]);
     const ip = r.stdout.trim();
     return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;

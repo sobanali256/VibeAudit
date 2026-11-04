@@ -72,6 +72,13 @@ describe("Sandbox", () => {
     expect((exec as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
   });
 
+  it("ipOf uses index() for the hyphenated network name", async () => {
+    const { exec, calls } = recorder({ stdout: "172.30.0.5\n" });
+    await new Sandbox("aud1", "http://p", exec).ipOf("x");
+    const inspect = calls.find((c) => c[0] === "inspect")!;
+    expect(inspect.join(" ")).toContain('index .NetworkSettings.Networks "va-aud1"');
+  });
+
   it("ipOf validates the returned address", async () => {
     const { exec } = recorder({ stdout: "172.30.0.5\n" });
     expect(await new Sandbox("aud1", "http://p", exec).ipOf("x")).toBe("172.30.0.5");
