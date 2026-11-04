@@ -12,7 +12,9 @@ Runtime-confirmed findings (the audit proves each one by running the app and hit
 - an unauthenticated AI proxy (`/api/chat`)
 - wildcard CORS
 
-Also present, flagged once static/client-bundle scanning lands:
+Also present, flagged once static/client-bundle scanning lands (these can't be proven just by
+running the app):
+- a hard-coded admin password compared in plain text (`/api/login` vs `ADMIN_PASSWORD`)
 - a secret shipped in the client bundle (`public/app.js`)
 - XSS via `innerHTML`
 
