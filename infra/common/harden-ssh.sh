@@ -22,5 +22,5 @@ EOF
 chmod 644 /etc/ssh/sshd_config.d/00-vibeaudit-hardening.conf
 
 sshd -t
-systemctl reload ssh
+systemctl try-reload-or-restart ssh
 sshd -T | grep -iE '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication) '
