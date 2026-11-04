@@ -1,7 +1,7 @@
 import postgres, { type Sql } from "postgres";
 
 export * from "./audits";
-export { MIGRATIONS, migrate } from "./migrations";
+export { MIGRATIONS, WEB_ROLE, migrate } from "./migrations";
 export type { Sql };
 
 export function createDb(url: string, opts: { max?: number } = {}): Sql {

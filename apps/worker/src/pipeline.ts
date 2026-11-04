@@ -66,7 +66,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
 
     // --- intake: resolve ref, stream the tarball into the sandbox (VM 1 never opens it) ---
     await stage(sql, id, "intake");
-    const resolved = await resolveRepo({ owner: audit.source.owner, repo: audit.source.repo, ref: audit.source.ref }, { token: deps.token });
+    const resolved = await resolveRepo({ owner: audit.source.owner, repo: audit.source.repo, ref: audit.source.ref, subpath: audit.source.subpath }, { token: deps.token });
     await ev(sql, id, "log", { stage: "intake", msg: `resolved ${audit.source.owner}/${audit.source.repo}@${resolved.ref}` });
     await sandbox.setup();
     const { stream, done } = await openTarball(resolved, { token: deps.token });
@@ -192,15 +192,16 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       startedAt,
       finishedAt: new Date().toISOString(),
     };
-    await finishAudit(sql, id, { status, report });
+    // Final event first: live viewers hang up once the status turns terminal.
     await ev(sql, id, "done", { status, score: report.score, findings: findings.length });
+    await finishAudit(sql, id, { status, report });
   } catch (err) {
     if (err instanceof Cancelled) {
       await ev(sql, id, "cancelled", {});
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    await ev(sql, id, "error", { message });
+    await ev(sql, id, "error", { message }).catch(() => {});
     await finishAudit(sql, id, { status: "failed", error: message }).catch(() => {});
   } finally {
     clearInterval(beat);

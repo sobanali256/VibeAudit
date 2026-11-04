@@ -25,6 +25,7 @@ export interface AuditRow {
   approval_request: ApprovalRequest | null;
   approval_decision: ApprovalDecision | null;
   report: Report | null;
+  owner_hash: string | null;
 }
 
 export interface AuditEventRow {
@@ -52,10 +53,11 @@ const TERMINAL: AuditStatus[] = ["completed", "static_only", "failed", "cancelle
 
 const json = (v: unknown) => v as JSONValue;
 
-export async function createAudit(sql: Sql, source: AuditSource): Promise<AuditRow> {
+export async function createAudit(sql: Sql, source: AuditSource, opts: { ownerHash?: string } = {}): Promise<AuditRow> {
   const id = newAuditId();
   const [row] = await sql<AuditRow[]>`
-    INSERT INTO audits (id, source) VALUES (${id}, ${sql.json(json(source))}) RETURNING *`;
+    INSERT INTO audits (id, source, owner_hash)
+    VALUES (${id}, ${sql.json(json(source))}, ${opts.ownerHash ?? null}) RETURNING *`;
   await sql`SELECT pg_notify(${CHANNEL_QUEUE}, ${id})`;
   return row!;
 }
@@ -64,6 +66,43 @@ export async function getAudit(sql: Sql, id: string): Promise<AuditRow | null> {
   if (!AUDIT_ID_RE.test(id)) return null;
   const [row] = await sql<AuditRow[]>`SELECT * FROM audits WHERE id = ${id}`;
   return row ?? null;
+}
+
+/** Audit row without the (possibly large) report, for frequent progress reads. */
+export type AuditSummaryRow = Omit<AuditRow, "report">;
+
+export async function getAuditSummary(sql: Sql, id: string): Promise<AuditSummaryRow | null> {
+  if (!AUDIT_ID_RE.test(id)) return null;
+  const [row] = await sql<AuditSummaryRow[]>`
+    SELECT id, source, status, stage, created_at, updated_at, started_at, finished_at,
+           heartbeat_at, error, approval_request, approval_decision, owner_hash
+    FROM audits WHERE id = ${id}`;
+  return row ?? null;
+}
+
+export async function getReport(sql: Sql, id: string): Promise<Report | null> {
+  if (!AUDIT_ID_RE.test(id)) return null;
+  const [row] = await sql<{ report: Report | null }[]>`SELECT report FROM audits WHERE id = ${id}`;
+  return row?.report ?? null;
+}
+
+/** Audits not yet finished (queued, running or awaiting approval): for intake back-pressure. */
+export async function countOpenAudits(sql: Sql): Promise<number> {
+  const [row] = await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM audits WHERE status IN ('queued','running','awaiting_approval')`;
+  return row?.n ?? 0;
+}
+
+/** 1-based position of a queued audit (audits ahead of it, including the active one, + 1). */
+export async function queuePosition(sql: Sql, id: string): Promise<number | null> {
+  const [row] = await sql<{ n: number | null }[]>`
+    SELECT CASE WHEN a.status = 'queued' THEN (
+      SELECT count(*)::int FROM audits b
+      WHERE b.status IN ('running','awaiting_approval')
+         OR (b.status = 'queued' AND b.created_at < a.created_at)
+    ) + 1 END AS n
+    FROM audits a WHERE a.id = ${id}`;
+  return row?.n ?? null;
 }
 
 /**
@@ -158,6 +197,7 @@ export async function decideApproval(
       SELECT approval_request FROM audits
       WHERE id = ${decision.auditId} AND status = 'awaiting_approval'
         AND approval_request->>'requestId' = ${decision.requestId}
+        AND approval_expires_at > now()
       FOR UPDATE`;
     if (!row) return false;
 

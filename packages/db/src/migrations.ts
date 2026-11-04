@@ -49,7 +49,39 @@ export const MIGRATIONS: { id: number; name: string; sql: string }[] = [
       );
     `,
   },
+  {
+    id: 2,
+    name: "audit owner token hash",
+    sql: /* sql */ `
+      -- sha256 of the per-audit owner token (held in the creator's cookie). Only the owner
+      -- may answer the approval step; anyone with the link can watch and read the report.
+      ALTER TABLE audits ADD COLUMN owner_hash text;
+    `,
+  },
 ];
+
+/** Role the internet-facing web app connects as (created by infra/cp/setup-app.sh). */
+export const WEB_ROLE = "vibeaudit_web";
+
+/**
+ * Least privilege for the web: read audits/events, create audits, answer approvals.
+ * It can write test keys but never read them back (only the audit_id column, which the
+ * DELETE in decideApproval needs), and it has no DDL (migrations run from the worker).
+ * Re-applied on every migrate() so grants track new tables/columns. Skipped when the role
+ * doesn't exist (dev, tests).
+ */
+const WEB_GRANTS = /* sql */ `
+  DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${WEB_ROLE}') THEN
+      REVOKE ALL ON audits, audit_events, audit_secrets, schema_migrations FROM ${WEB_ROLE};
+      GRANT SELECT, INSERT (id, source, owner_hash),
+            UPDATE (status, approval_decision, finished_at, updated_at, heartbeat_at)
+        ON audits TO ${WEB_ROLE};
+      GRANT SELECT ON audit_events TO ${WEB_ROLE};
+      GRANT SELECT (audit_id), INSERT (audit_id, test_keys), DELETE ON audit_secrets TO ${WEB_ROLE};
+    END IF;
+  END $$;
+`;
 
 const LOCK_KEY = 0x76696265; // "vibe": serialize concurrent migrators (web + worker boot)
 
@@ -70,6 +102,7 @@ export async function migrate(sql: Sql): Promise<number[]> {
       await tx`INSERT INTO schema_migrations (id, name) VALUES (${m.id}, ${m.name})`;
       applied.push(m.id);
     }
+    await tx.unsafe(WEB_GRANTS);
     return applied;
   });
 }

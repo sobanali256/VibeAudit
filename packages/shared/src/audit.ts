@@ -1,19 +1,9 @@
 import { z } from "zod";
 import { AUDIT_ID_RE, ENV_VAR_RE, KEY_PROVIDERS, SECRET_VALUE_RE } from "./ids";
 
-/** Pipeline stages, in order. The proxy allowlist is keyed on these too. */
-export const AUDIT_STAGES = [
-  "intake",
-  "plan",
-  "approve",
-  "static",
-  "install",
-  "build",
-  "run",
-  "dynamic",
-  "verify",
-  "report",
-] as const;
+import { AUDIT_STAGES } from "./stages";
+
+export { AUDIT_STAGES };
 export const AuditStage = z.enum(AUDIT_STAGES);
 export type AuditStage = z.infer<typeof AuditStage>;
 
@@ -34,6 +24,8 @@ export const AuditSource = z.discriminatedUnion("kind", [
     owner: z.string(),
     repo: z.string(),
     ref: z.string().optional(),
+    /** Path after the ref in a /tree/ or /blob/ URL; intake uses it to resolve slash-y refs. */
+    subpath: z.string().optional(),
   }),
   z.object({
     kind: z.literal("zip"),
@@ -69,6 +61,8 @@ export const MAX_ARCHIVE_ENTRIES = 50_000;
 export const MAX_CONCURRENT_AUDITS = 1;
 /** The janitor force-removes any audit container or network older than this. */
 export const JANITOR_MAX_AGE_MS = 30 * 60_000;
+/** Intake back-pressure: new audits are refused while this many are queued or active. */
+export const MAX_OPEN_AUDITS = 10;
 /** A worker lease (heartbeat) older than this means the worker crashed; the audit is failed. */
 export const WORKER_LEASE_MS = 90_000;
 /** A queued audit never picked up within this is cancelled, so the queue can't wedge. */

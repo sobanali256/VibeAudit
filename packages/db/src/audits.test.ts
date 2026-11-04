@@ -10,8 +10,12 @@ import {
   deleteSecrets,
   failStaleAudits,
   finishAudit,
+  countOpenAudits,
   getAudit,
+  getAuditSummary,
+  getReport,
   getSecrets,
+  queuePosition,
   heartbeat,
   listEvents,
   migrate,
@@ -59,7 +63,7 @@ d("audits (postgres)", { timeout: 60_000 }, () => {
     if (!dbrow || !/_test$/.test(dbrow.current_database)) throw new Error(`refusing to drop non-test db ${dbrow?.current_database}`);
     await sql`DROP SCHEMA public CASCADE`;
     await sql`CREATE SCHEMA public`;
-    expect(await migrate(sql)).toEqual([1]);
+    expect(await migrate(sql)).toEqual([1, 2]);
     expect(await migrate(sql)).toEqual([]); // idempotent
   });
   beforeEach(async () => {
@@ -222,5 +226,35 @@ d("audits (postgres)", { timeout: 60_000 }, () => {
 
   it("deleteSecrets is a no-op when absent", async () => {
     await expect(deleteSecrets(sql, "nonexistentauditid00")).resolves.toBeUndefined();
+  });
+
+  it("summary omits the report; owner hash stored; queue position and open count", async () => {
+    const a = await createAudit(sql, src, { ownerHash: "ab".repeat(32) });
+    const b = await createAudit(sql, src);
+    const c = await createAudit(sql, src);
+    expect(await countOpenAudits(sql)).toBe(3);
+    expect(await queuePosition(sql, b.id)).toBe(2);
+    await claimNextAudit(sql);
+    expect(await queuePosition(sql, a.id)).toBeNull(); // running, not queued
+    expect(await queuePosition(sql, b.id)).toBe(2); // behind the active one
+    expect(await queuePosition(sql, c.id)).toBe(3);
+
+    const report = { auditId: a.id, source: src, status: "completed" as const, score: 90, mode: "runtime" as const,
+      findings: [], containment: [], startedAt: "x", finishedAt: "y" };
+    await finishAudit(sql, a.id, { status: "completed", report });
+    const sum = await getAuditSummary(sql, a.id);
+    expect(sum?.owner_hash).toBe("ab".repeat(32));
+    expect(sum && "report" in sum).toBe(false);
+    expect((await getReport(sql, a.id))?.score).toBe(90);
+    expect(await countOpenAudits(sql)).toBe(2);
+    expect(await getAuditSummary(sql, "bad id")).toBeNull();
+  });
+
+  it("refuses a decision once the approval deadline has passed, even before the sweep", async () => {
+    const a = await createAudit(sql, src);
+    await claimNextAudit(sql);
+    await requestApproval(sql, a.id, { ...req(a.id), expiresAt: new Date(Date.now() - 1000).toISOString() });
+    expect(await decideApproval(sql, { decision: "static_only", auditId: a.id, requestId: "req-0000001" })).toBe(false);
+    expect((await getAudit(sql, a.id))?.status).toBe("awaiting_approval");
   });
 });
