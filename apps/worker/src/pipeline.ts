@@ -377,34 +377,125 @@ async function waitForApp(sandbox: Sandbox, appName: string, port: number, deadl
   return null;
 }
 
+interface ProbeResult {
+  status: number;
+  body: string;
+  headers: string;
+}
+
 async function probe(sandbox: Sandbox, id: string, ip: string, port: number, findings: Finding[], sql: Sql): Promise<void> {
   const base = `http://${ip}:${port}`;
-  const get = async (path: string) => {
-    const r = await sandbox.run({
-      role: "browser",
-      image: "curlimages/curl:8.17.0",
-      cmd: ["-sS", "-m", "6", "-w", "\\n%{http_code}", `${base}${path}`],
-      timeoutMs: 12_000,
-      name: `va-${id}-probe`,
-    });
-    const nl = r.stdout.lastIndexOf("\n");
-    return { status: Number(r.stdout.slice(nl + 1).trim()) || 0, body: r.stdout.slice(0, nl) };
+  // One curl per request. `-D -` dumps response headers ahead of the body on stdout; we append
+  // a sentinel + the numeric status so we can split headers / body / status reliably. `method`,
+  // `headers` and `data` let a probe send a forged header or a POST without extra plumbing.
+  const SEP = "\\n__VA_STATUS__:";
+  const call = async (path: string, opts: { method?: string; headers?: string[]; data?: string } = {}): Promise<ProbeResult> => {
+    const cmd = ["-sS", "-m", "6", "-D", "-"];
+    if (opts.method) cmd.push("-X", opts.method);
+    for (const h of opts.headers ?? []) cmd.push("-H", h);
+    if (opts.data !== undefined) cmd.push("--data", opts.data);
+    cmd.push("-w", SEP + "%{http_code}", `${base}${path}`);
+    const r = await sandbox.run({ role: "browser", image: "curlimages/curl:8.17.0", cmd, timeoutMs: 12_000, name: `va-${id}-probe` });
+    const marker = r.stdout.lastIndexOf("\n__VA_STATUS__:");
+    const status = marker >= 0 ? Number(r.stdout.slice(marker + "\n__VA_STATUS__:".length).trim()) || 0 : 0;
+    const out = marker >= 0 ? r.stdout.slice(0, marker) : r.stdout;
+    // Headers are everything up to the first blank line; the rest is the body.
+    const split = out.search(/\r?\n\r?\n/);
+    const headers = split >= 0 ? out.slice(0, split) : "";
+    const body = split >= 0 ? out.slice(split).replace(/^\r?\n\r?\n/, "") : out;
+    return { status, body, headers };
   };
 
-  // A small battery of unauthenticated reads. Each finding is runtime-confirmed by the response.
-  const users = await get("/api/users");
-  if (users.status === 200 && /passwordHash|password/i.test(users.body)) {
-    findings.push(mkFinding("f-users", "critical", "missing_auth", "User records exposed without authentication",
-      "GET /api/users returns the full user table, including password hashes, with no authentication.", true,
-      [{ kind: "http", method: "GET", url: "/api/users", status: 200, bodyExcerpt: users.body.slice(0, 300) }], "probe"));
-  }
-  const debug = await get("/api/debug");
-  if (debug.status === 200 && /env|process/i.test(debug.body)) {
-    findings.push(mkFinding("f-debug", "high", "secret_exposure", "Debug endpoint dumps the environment",
-      "GET /api/debug returns process environment variables and server internals to any caller.", true,
-      [{ kind: "http", method: "GET", url: "/api/debug", status: 200, bodyExcerpt: debug.body.slice(0, 300) }], "probe"));
-  }
-  await ev(sql, id, "log", { stage: "dynamic", msg: `probed /api/users (${users.status}), /api/debug (${debug.status})` });
+  // A battery of unauthenticated/forged requests. Each finding is runtime-confirmed by the
+  // response. One probe throwing must not drop the others, so each runs under `safe`.
+  const results: Record<string, number> = {};
+  const safe = async (label: string, fn: () => Promise<void>) => {
+    try {
+      await fn();
+    } catch (e) {
+      results[label] = -1;
+      await ev(sql, id, "log", { stage: "dynamic", msg: `probe ${label} errored: ${String((e as Error)?.message ?? e).slice(0, 200)}` });
+    }
+  };
+
+  await safe("users", async () => {
+    const users = await call("/api/users");
+    results.users = users.status;
+    if (users.status === 200 && /passwordHash|password/i.test(users.body)) {
+      findings.push(mkFinding("f-users", "critical", "missing_auth", "User records exposed without authentication",
+        "GET /api/users returns the full user table, including password hashes, with no authentication.", true,
+        [{ kind: "http", method: "GET", url: "/api/users", status: 200, bodyExcerpt: users.body.slice(0, 300) }], "probe"));
+    }
+  });
+
+  await safe("debug", async () => {
+    const debug = await call("/api/debug");
+    results.debug = debug.status;
+    if (debug.status === 200 && /env|process/i.test(debug.body)) {
+      findings.push(mkFinding("f-debug", "high", "secret_exposure", "Debug endpoint dumps the environment",
+        "GET /api/debug returns process environment variables and server internals to any caller.", true,
+        [{ kind: "http", method: "GET", url: "/api/debug", status: 200, bodyExcerpt: debug.body.slice(0, 300) }], "probe"));
+    }
+  });
+
+  // IDOR: a note belonging to another user is readable by id with no auth or ownership check.
+  await safe("idor", async () => {
+    const own = await call("/api/notes/1");
+    const other = await call("/api/notes/2");
+    results.idor = other.status;
+    if (other.status === 200 && own.status === 200 && /"(text|ownerId)"/i.test(other.body)) {
+      findings.push(mkFinding("f-idor", "high", "missing_auth", "Any record readable by id (IDOR)",
+        "GET /api/notes/:id returns a record for any id with no authentication or ownership check, so one user can read another's data.", true,
+        [{ kind: "http", method: "GET", url: "/api/notes/2", status: other.status, bodyExcerpt: other.body.slice(0, 300) }], "probe"));
+    }
+  });
+
+  // Broken access control: an admin-only action gated solely by a client-supplied header.
+  await safe("admin-header", async () => {
+    const forged = await call("/api/admin/delete-user", { method: "POST", headers: ["Content-Type: application/json", "x-user-role: admin"], data: '{"id":3}' });
+    results["admin-header"] = forged.status;
+    if (forged.status >= 200 && forged.status < 300 && /"ok"|success/i.test(forged.body)) {
+      findings.push(mkFinding("f-admin-header", "critical", "missing_auth", "Admin action authorized by a client-supplied header",
+        "POST /api/admin/delete-user performs a privileged action when the request sets x-user-role: admin, a value any client controls, so anyone can act as an administrator.", true,
+        [{ kind: "http", method: "POST", url: "/api/admin/delete-user", status: forged.status, bodyExcerpt: forged.body.slice(0, 200) }], "probe"));
+    }
+  });
+
+  // Unauthenticated AI proxy: the endpoint accepts a request with no credentials. A 502 here is
+  // still proof (the sandbox proxy blocks the upstream call) — what matters is it wasn't gated.
+  await safe("chat", async () => {
+    const chat = await call("/api/chat", { method: "POST", headers: ["Content-Type: application/json"], data: '{"message":"ping"}' });
+    results.chat = chat.status;
+    if (chat.status !== 404 && chat.status !== 401 && chat.status !== 403) {
+      findings.push(mkFinding("f-chat", "high", "missing_auth", "AI proxy endpoint has no authentication or rate limit",
+        "POST /api/chat forwards to a paid upstream API without requiring any auth, so anyone can run up the bill against the server's key.", true,
+        [{ kind: "http", method: "POST", url: "/api/chat", status: chat.status, bodyExcerpt: chat.body.slice(0, 200) }], "probe"));
+    }
+  });
+
+  // Verbose errors: an unhandled error returns a stack trace to the caller.
+  await safe("crash", async () => {
+    const crash = await call("/api/crash");
+    results.crash = crash.status;
+    if (crash.status >= 500 && /\bat\b.*\.js:\d+|Error:/i.test(crash.body)) {
+      findings.push(mkFinding("f-crash", "medium", "unsafe_defaults", "Server errors leak stack traces",
+        "An unhandled error on /api/crash returns a full stack trace, exposing file paths and server internals.", true,
+        [{ kind: "http", method: "GET", url: "/api/crash", status: crash.status, bodyExcerpt: crash.body.slice(0, 300) }], "probe"));
+    }
+  });
+
+  // Wildcard CORS: Access-Control-Allow-Origin: * on an API response.
+  await safe("cors", async () => {
+    const root = await call("/api/users");
+    const acao = /^access-control-allow-origin:\s*(.+)$/im.exec(root.headers);
+    if (acao && acao[1]!.trim() === "*") {
+      findings.push(mkFinding("f-cors", "medium", "unsafe_defaults", "Wildcard CORS policy",
+        "Responses send Access-Control-Allow-Origin: *, letting any website read the API's responses in a victim's browser.", true,
+        [{ kind: "http", method: "GET", url: "/api/users", status: root.status, headers: { "access-control-allow-origin": "*" } }], "probe"));
+    }
+  });
+
+  await ev(sql, id, "log", { stage: "dynamic", msg: `probed ${Object.entries(results).map(([k, v]) => `${k} (${v})`).join(", ")}` });
 }
 
 function mkFinding(id: string, severity: Finding["severity"], category: Finding["category"], title: string, description: string, confirmed: boolean, evidence: Finding["evidence"], source: Finding["source"]): Finding {
@@ -421,7 +512,7 @@ function tailLog(r: { stdout: string; stderr: string }): string {
   return (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).slice(-2000);
 }
 
-export { SandboxError };
+export { SandboxError, probe as _probeForTest };
 
 /**
  * Build the containment log (and add exfil findings). Best effort: a missing or unreadable
