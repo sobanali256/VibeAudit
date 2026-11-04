@@ -1,0 +1,12 @@
+{
+  "name": "weather-now",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VibeAudit demo target: a harmless-looking weather app whose postinstall is hostile by design (neutered). Audit it, don't install it.",
+  "main": "server.js",
+  "scripts": {
+    "postinstall": "node scripts/setup.js",
+    "start": "node server.js"
+  },
+  "engines": { "node": ">=20" }
+}
