@@ -24,8 +24,8 @@ describe("Sandbox", () => {
     expect(net).toEqual(expect.arrayContaining(["network", "create", "--label", "vibeaudit.audit=aud1", "va-aud1"]));
     expect(net).not.toContain("--internal");
     const mk = calls.find((c) => c[0] === "run" && c.join(" ").includes("mkdir"))!;
-    expect(mk.join(" ")).toContain("chown -R 1000:1000 /ws/aud1");
-    expect(mk).toEqual(expect.arrayContaining(["--runtime=runsc", "--network", "none", "--user", "0:0"]));
+    expect(mk.join(" ")).toContain("mkdir -p /ws/aud1/app");
+    expect(mk).toEqual(expect.arrayContaining(["--runtime=runsc", "--network", "none", "--user", "1000:1000"]));
   });
 
   it("run() applies every mandatory container flag and the workspace mount for app", async () => {

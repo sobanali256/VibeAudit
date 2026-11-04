@@ -98,11 +98,12 @@ export class Sandbox {
     if (net.code !== 0 && !/already exists/.test(net.stderr)) {
       throw new SandboxError(`network create failed: ${net.stderr.trim()}`);
     }
+    // Run as the workspace owner (1000). Root would need CAP_DAC_OVERRIDE, which we drop.
     const mk = await this.docker([
       "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
-      "-v", `${WS_HOST_ROOT}:/ws`, "--user", "0:0", SETUP_IMAGE,
+      "-v", `${WS_HOST_ROOT}:/ws`, "--user", "1000:1000", SETUP_IMAGE,
       "sh", "-c",
-      `mkdir -p /ws/${this.auditId}/app /ws/${this.auditId}/home /ws/${this.auditId}/.cache && chown -R 1000:1000 /ws/${this.auditId}`,
+      `mkdir -p /ws/${this.auditId}/app /ws/${this.auditId}/home /ws/${this.auditId}/.cache`,
     ], { timeoutMs: 30_000 });
     if (mk.code !== 0) throw new SandboxError(`workspace create failed: ${mk.stderr.trim()}`);
   }
@@ -173,7 +174,7 @@ export class Sandbox {
       await this.docker(["network", "rm", this.network]);
       await this.docker([
         "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
-        "-v", `${WS_HOST_ROOT}:/ws`, "--user", "0:0", SETUP_IMAGE,
+        "-v", `${WS_HOST_ROOT}:/ws`, "--user", "1000:1000", SETUP_IMAGE,
         "rm", "-rf", `/ws/${this.auditId}`,
       ], { timeoutMs: 30_000 });
     } catch {
