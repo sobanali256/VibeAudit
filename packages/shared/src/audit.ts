@@ -69,6 +69,10 @@ export const MAX_ARCHIVE_ENTRIES = 50_000;
 export const MAX_CONCURRENT_AUDITS = 1;
 /** The janitor force-removes any audit container or network older than this. */
 export const JANITOR_MAX_AGE_MS = 30 * 60_000;
+/** A worker lease (heartbeat) older than this means the worker crashed; the audit is failed. */
+export const WORKER_LEASE_MS = 90_000;
+/** A queued audit never picked up within this is cancelled, so the queue can't wedge. */
+export const QUEUED_MAX_AGE_MS = 60 * 60_000;
 /** Label put on every container/network/volume the worker creates, for the janitor. */
 export const AUDIT_LABEL = "vibeaudit.audit";
 
@@ -105,7 +109,7 @@ export const ApprovalRequest = z.object({
   ),
   /** Install scripts (postinstall etc.) found in the dependency tree. */
   installScripts: z.array(z.object({ pkg: z.string(), script: z.string() })),
-  expiresAt: z.string(),
+  expiresAt: z.string().datetime({ offset: true }),
 });
 export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
 
