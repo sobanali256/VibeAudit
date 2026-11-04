@@ -20,6 +20,7 @@ import {
 
 const SETUP_IMAGE = "busybox:1.37";
 const WS_HOST_ROOT = "/srv/vibeaudit/ws"; // the size-capped fs created by infra/sbx/setup.sh
+const KERN_LOG = "/var/log/kern.log"; // rsyslog on VM 2; holds the VIBEAUDIT-DROP lines
 const MAX_OUTPUT = 256 * 1024; // per-exec stdout/stderr cap (logs are evidence, not bulk data)
 
 export interface ExecResult {
@@ -77,6 +78,8 @@ export interface RunSpec {
 export class Sandbox {
   readonly network: string;
   readonly workspaceHostPath: string;
+  /** Host bridge interface of the audit network (iptables logs drops by it). Set by setup(). */
+  bridge: string | null = null;
   private tornDown = false;
 
   constructor(
@@ -98,6 +101,13 @@ export class Sandbox {
     if (net.code !== 0 && !/already exists/.test(net.stderr)) {
       throw new SandboxError(`network create failed: ${net.stderr.trim()}`);
     }
+    let netId = net.code === 0 ? net.stdout.trim() : "";
+    if (!/^[0-9a-f]{12,64}$/.test(netId)) {
+      const ins = await this.docker(["network", "inspect", "-f", "{{.Id}}", this.network]);
+      netId = ins.stdout.trim();
+    }
+    // Docker names a user bridge br-<first 12 of the network id> unless overridden.
+    this.bridge = /^[0-9a-f]{12,64}$/.test(netId) ? `br-${netId.slice(0, 12)}` : null;
     // Run as the workspace owner (1000). Root would need CAP_DAC_OVERRIDE, which we drop.
     const mk = await this.docker([
       "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
@@ -172,6 +182,24 @@ export class Sandbox {
   }
 
   /** Remove everything this audit created. Safe to call more than once; never throws. */
+  /**
+   * iptables drop lines for this audit's bridge from VM 2's kernel log. Read by a throwaway
+   * container (ours, not repo code) with only that file mounted read-only, since the worker
+   * reaches VM 2 through the Docker API alone. Group adm (4) can read kern.log; no caps.
+   */
+  async firewallLog(maxLines = 1000): Promise<string> {
+    if (!this.bridge) return "";
+    const r = await this.docker([
+      "run", "--rm", "--name", `va-${this.auditId}-fwlog`, "--label", `${AUDIT_LABEL}=${this.auditId}`,
+      "--runtime=runsc", "--network", "none", "--cap-drop", "ALL", "--read-only",
+      "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "128m",
+      "--user", "0:4", "-v", `${KERN_LOG}:/k.log:ro`, SETUP_IMAGE,
+      // The bridge name is [0-9a-f-] only (checked in setup), safe to interpolate.
+      "sh", "-c", `grep -F "IN=${this.bridge} " /k.log | tail -n ${Math.trunc(maxLines)}`,
+    ], { timeoutMs: 15_000 });
+    return r.code === 0 || r.code === 1 ? r.stdout : "";
+  }
+
   async teardown(): Promise<void> {
     if (this.tornDown) return;
     this.tornDown = true;

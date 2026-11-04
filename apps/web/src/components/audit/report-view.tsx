@@ -1,4 +1,5 @@
 import type { ContainmentEntry, Evidence, Finding, Report, Severity } from "@vibeaudit/shared";
+import { LocalTime } from "@/components/local-time";
 
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
 const SEV_STYLE: Record<Severity, string> = {
@@ -30,9 +31,13 @@ export function ReportView({ report }: { report: Report }) {
         <Score score={report.score} />
         <div className="flex flex-1 flex-col gap-2">
           <h2 id="report-title" className="text-lg font-semibold">
-            {report.mode === "runtime" ? "Runtime audit" : "Static-only audit"}
+            {report.status === "failed" ? "Partial results" : report.mode === "runtime" ? "Runtime audit" : "Static-only audit"}
           </h2>
-          {report.mode === "static_only" && report.staticOnlyReason ? (
+          {report.status === "failed" ? (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
+              The audit stopped early. What was found before it stopped, and everything the sandbox tried, is below.
+            </p>
+          ) : report.mode === "static_only" && report.staticOnlyReason ? (
             <p className="text-sm text-zinc-600 dark:text-zinc-400">
               The app wasn&apos;t run: {report.staticOnlyReason}. Findings come from the code alone.
             </p>
@@ -171,47 +176,103 @@ function EvidenceBlock({ e }: { e: Evidence }) {
 }
 
 function Containment({ entries }: { entries: ContainmentEntry[] }) {
-  const blocked = entries.filter((e) => e.source !== "proxy" || e.verdict !== "allowed");
+  const flagged: ContainmentEntry[] = [];
+  const allowed: Extract<ContainmentEntry, { source: "proxy" }>[] = [];
+  let exfil = 0;
+  let blocked = 0;
+  let fw = 0;
+  let limitsHit = 0;
+  for (const e of entries) {
+    if (e.source === "proxy" && e.verdict === "allowed") {
+      allowed.push(e);
+      continue;
+    }
+    flagged.push(e);
+    if (e.source === "proxy") {
+      if (e.verdict === "exfil") exfil++;
+      else blocked++;
+    }
+    else if (e.source === "firewall") fw++;
+    else limitsHit++;
+  }
+  const allowedRequests = allowed.reduce((n, e) => n + (e.repeat ?? 1), 0);
+
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Containment</h3>
       {entries.length === 0 ? (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">No containment events were recorded for this audit.</p>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">The sandbox made no network requests and hit no limits.</p>
       ) : (
         <>
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            {entries.length} network or resource event(s), {blocked.length} blocked or flagged.
-          </p>
-          <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-zinc-50 text-zinc-500 dark:bg-zinc-900">
-                <tr>
-                  <th className="px-3 py-2 font-medium">Stage</th>
-                  <th className="px-3 py-2 font-medium">Event</th>
-                  <th className="px-3 py-2 font-medium">Target</th>
-                  <th className="px-3 py-2 font-medium">Detail</th>
-                </tr>
-              </thead>
-              <tbody className="font-mono">
-                {entries.slice(0, 200).map((e, i) => (
-                  <tr key={i} className="border-t border-zinc-200 dark:border-zinc-800">
-                    <td className="px-3 py-1.5">{e.stage ?? "-"}</td>
-                    <td className="px-3 py-1.5">{eventLabel(e)}</td>
-                    <td className="px-3 py-1.5 break-all">{target(e)}</td>
-                    <td className="px-3 py-1.5 break-all">{detail(e)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="flex flex-wrap gap-1.5 text-xs">
+            {exfil ? <Chip cls="bg-red-600 text-white">{exfil} exfiltration attempt{exfil === 1 ? "" : "s"} blocked</Chip> : null}
+            {blocked ? <Chip cls="bg-orange-100 text-orange-900 dark:bg-orange-950 dark:text-orange-200">{blocked} request{blocked === 1 ? "" : "s"} blocked by the proxy</Chip> : null}
+            {fw ? <Chip cls="bg-orange-100 text-orange-900 dark:bg-orange-950 dark:text-orange-200">{fw} packet{fw === 1 ? "" : "s"} dropped by the firewall</Chip> : null}
+            {limitsHit ? <Chip cls="bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200">{limitsHit} limit{limitsHit === 1 ? "" : "s"} hit</Chip> : null}
+            {allowedRequests ? (
+              <Chip cls="bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                {allowedRequests} allowed request{allowedRequests === 1 ? "" : "s"} to {new Set(allowed.map((e) => e.host)).size} host(s)
+              </Chip>
+            ) : null}
           </div>
+
+          {flagged.length ? (
+            <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-zinc-50 text-zinc-500 dark:bg-zinc-900">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Time</th>
+                    <th className="px-3 py-2 font-medium">Stage</th>
+                    <th className="px-3 py-2 font-medium">Control</th>
+                    <th className="px-3 py-2 font-medium">Target</th>
+                    <th className="px-3 py-2 font-medium">Detail</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {flagged.map((e, i) => (
+                    <tr key={i} className="border-t border-zinc-200 align-top dark:border-zinc-800">
+                      <td className="px-3 py-1.5 whitespace-nowrap text-zinc-500"><LocalTime iso={e.at} /></td>
+                      <td className="px-3 py-1.5">{e.stage ?? "-"}</td>
+                      <td className={`px-3 py-1.5 whitespace-nowrap ${e.source === "proxy" && e.verdict === "exfil" ? "font-semibold text-red-700 dark:text-red-400" : ""}`}>
+                        {eventLabel(e)}
+                      </td>
+                      <td className="px-3 py-1.5 break-all">{target(e)}</td>
+                      <td className="px-3 py-1.5 break-all">{detail(e)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">Nothing was blocked: every request went to an allowed host.</p>
+          )}
+
+          {allowed.length ? (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-zinc-600 dark:text-zinc-400">Allowed traffic by stage and host</summary>
+              <ul className="mt-2 flex flex-col gap-1 font-mono">
+                {allowed.map((e, i) => (
+                  <li key={i}>
+                    <span className="text-zinc-500">{e.stage ?? "-"}</span> {e.method ?? ""} {e.host}
+                    {e.keyVar ? <span className="text-emerald-700 dark:text-emerald-400"> (test key {e.keyVar} swapped in)</span> : null}
+                    <span className="text-zinc-500"> ×{e.repeat ?? 1}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </>
       )}
     </div>
   );
 }
 
+function Chip({ cls, children }: { cls: string; children: React.ReactNode }) {
+  return <span className={`rounded px-2 py-0.5 font-medium ${cls}`}>{children}</span>;
+}
+
 function eventLabel(e: ContainmentEntry): string {
-  if (e.source === "proxy") return `proxy ${e.verdict}`;
+  if (e.source === "proxy") return e.verdict === "exfil" ? "exfil blocked" : `proxy ${e.verdict}`;
   if (e.source === "firewall") return `firewall drop (${e.direction})`;
   return `limit: ${e.limit}`;
 }

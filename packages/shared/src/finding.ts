@@ -54,6 +54,6 @@ export const Finding = z.object({
   confirmed: z.boolean(),
   evidence: z.array(Evidence).min(1),
   fix: z.string().optional(),
-  source: z.enum(["gitleaks", "dep_audit", "llm_review", "probe", "vision"]),
+  source: z.enum(["gitleaks", "dep_audit", "llm_review", "probe", "vision", "proxy"]),
 });
 export type Finding = z.infer<typeof Finding>;

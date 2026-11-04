@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import {
   type ApprovalRequest,
   type AuditStage,
+  type ContainmentEntry,
   type Finding,
   KEY_PROVIDERS,
   type ProxyState,
@@ -25,6 +26,7 @@ import { type Plan, planFromManifest } from "./planner";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { clearProxyState, writeProxyState } from "./proxy-state";
+import { type StageMark, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents } from "./containment";
 
 export interface PipelineDeps {
   sql: Sql;
@@ -58,6 +60,18 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
   const startedAt = new Date().toISOString();
   let staticOnly = false;
   let staticReason: string | undefined;
+  // Containment bookkeeping: where the proxy log stood when we began, when each stage started,
+  // and any resource caps we hit.
+  const windowStartMs = Date.now();
+  const proxyOffset = await proxyLogOffset();
+  const marks: StageMark[] = [];
+  const limitHits: ContainmentEntry[] = [];
+  const enter = async (name: AuditStage) => {
+    marks.push({ stage: name, at: Date.now() });
+    await stage(sql, id, name);
+  };
+  const limitHit = (st: AuditStage, detail: string) =>
+    limitHits.push({ source: "limit", at: new Date().toISOString(), stage: st, limit: "stage_timeout", detail });
 
   const beat = setInterval(() => void heartbeat(sql, id).catch(() => {}), 20_000);
 
@@ -65,7 +79,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     if (audit.source.kind !== "github") throw new Error("only github sources are supported so far");
 
     // --- intake: resolve ref, stream the tarball into the sandbox (VM 1 never opens it) ---
-    await stage(sql, id, "intake");
+    await enter("intake");
     const resolved = await resolveRepo({ owner: audit.source.owner, repo: audit.source.repo, ref: audit.source.ref, subpath: audit.source.subpath }, { token: deps.token });
     await ev(sql, id, "log", { stage: "intake", msg: `resolved ${audit.source.owner}/${audit.source.repo}@${resolved.ref}` });
     await sandbox.setup();
@@ -87,7 +101,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     await ev(sql, id, "log", { stage: "intake", msg: `unpacked ${bytes} bytes` });
 
     // --- plan: read the manifest from the sandbox, decide how to run it ---
-    await stage(sql, id, "plan");
+    await enter("plan");
     const manifest = await readManifest(sandbox, image, id);
     const plan = planFromManifest(manifest);
     await ev(sql, id, "log", { stage: "plan", msg: `framework=${plan.framework} pm=${plan.packageManager}` });
@@ -102,7 +116,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     }
 
     // --- approve: park for the human, then act on the decision ---
-    await stage(sql, id, "approve");
+    await enter("approve");
     const canaries = planCanaries(plan, id);
     const req = buildApprovalRequest(id, plan, manifest);
     await requestApproval(sql, id, req);
@@ -119,7 +133,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
 
     if (!staticOnly) {
       // --- install (read-only egress: registries, GET/HEAD only) ---
-      await stage(sql, id, "install");
+      await enter("install");
       await writeProxyState({ auditId: id, stage: "install", keys: {}, canaries: Object.values(canaries) });
       const install = await sandbox.run({
         role: "app",
@@ -130,12 +144,15 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         name: `va-${id}-install`,
       });
       await ev(sql, id, "log", { stage: "install", msg: tailLog(install) });
-      if (install.timedOut) throw new Error("install timed out");
+      if (install.timedOut) {
+        limitHit("install", `install exceeded ${STAGE_TIMEOUTS_MS.install / 1000}s and was killed`);
+        throw new Error("install timed out");
+      }
       if (install.code !== 0) { staticOnly = true; staticReason = "dependency install failed"; }
 
       // --- build (if any) ---
       if (!staticOnly && plan.buildCommand) {
-        await stage(sql, id, "build");
+        await enter("build");
         await writeProxyState({ auditId: id, stage: "build", keys: {}, canaries: Object.values(canaries) });
         const build = await sandbox.run({
           role: "app",
@@ -146,12 +163,13 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           name: `va-${id}-build`,
         });
         await ev(sql, id, "log", { stage: "build", msg: tailLog(build) });
-        if (build.code !== 0) { staticOnly = true; staticReason = "build failed"; }
+        if (build.timedOut) limitHit("build", `build exceeded ${STAGE_TIMEOUTS_MS.buildPerTry / 1000}s and was killed`);
+        if (build.code !== 0) { staticOnly = true; staticReason = build.timedOut ? "build timed out" : "build failed"; }
       }
 
       // --- run + dynamic probing ---
       if (!staticOnly && plan.startCommand) {
-        await stage(sql, id, "run");
+        await enter("run");
         await writeProxyState({ auditId: id, stage: "run", keys: proxyKeys(testKeys), canaries: Object.values(canaries) });
         const appName = await sandbox.start({
           role: "app",
@@ -163,11 +181,12 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         const runDeadline = Date.now() + STAGE_TIMEOUTS_MS.run;
         const ip = await waitForApp(sandbox, appName, plan.port ?? 3000, runDeadline);
         if (!ip) {
+          if (Date.now() >= runDeadline) limitHit("run", `the app didn't start listening within ${STAGE_TIMEOUTS_MS.run / 1000}s`);
           staticOnly = true;
           staticReason = "the app did not start listening";
           await ev(sql, id, "log", { stage: "run", msg: tailLog({ stdout: await sandbox.logs(appName), stderr: "" }) });
         } else {
-          await stage(sql, id, "dynamic");
+          await enter("dynamic");
           // Cap dynamic probing by the remaining run budget; whatever we have is still reported.
           await Promise.race([
             probe(sandbox, id, ip, plan.port ?? 3000, findings, sql),
@@ -178,8 +197,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     }
 
     // --- report ---
-    await stage(sql, id, "report");
+    await enter("report");
     const status = staticOnly ? "static_only" : "completed";
+    const containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
     const report: Report = {
       auditId: id,
       source: audit.source,
@@ -188,7 +208,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       staticOnlyReason: staticReason,
       score: scoreFrom(findings),
       findings,
-      containment: [],
+      containment,
       startedAt,
       finishedAt: new Date().toISOString(),
     };
@@ -201,8 +221,28 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
+    // Keep what the sandbox did even when the audit fails: a hostile install that exfils and
+    // then hangs is exactly the case whose containment log matters most.
+    let partial: Report | undefined;
+    try {
+      const containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
+      partial = {
+        auditId: id,
+        source: audit.source,
+        status: "failed",
+        mode: marks.some((m) => m.stage === "install") ? "runtime" : "static_only",
+        staticOnlyReason: `the audit failed: ${message.slice(0, 300)}`,
+        score: scoreFrom(findings),
+        findings,
+        containment,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      };
+    } catch {
+      // best effort; the failure itself is still recorded below
+    }
     await ev(sql, id, "error", { message }).catch(() => {});
-    await finishAudit(sql, id, { status: "failed", error: message }).catch(() => {});
+    await finishAudit(sql, id, { status: "failed", error: message, report: partial }).catch(() => {});
   } finally {
     clearInterval(beat);
     await clearProxyState().catch(() => {});
@@ -382,3 +422,25 @@ function tailLog(r: { stdout: string; stderr: string }): string {
 }
 
 export { SandboxError };
+
+/**
+ * Build the containment log (and add exfil findings). Best effort: a missing or unreadable
+ * log must never fail an otherwise finished audit, so each source degrades to empty.
+ */
+async function assembleContainment(
+  sandbox: Sandbox,
+  id: string,
+  proxyOffset: number,
+  windowStartMs: number,
+  marks: StageMark[],
+  limitHits: ContainmentEntry[],
+  findings: Finding[],
+): Promise<ContainmentEntry[]> {
+  const windowEndMs = Date.now();
+  const [proxy, fwText] = await Promise.all([
+    readProxyEvents({ auditId: id, offset: proxyOffset, windowStartMs, windowEndMs, marks }).catch(() => ({ entries: [], findings: [] })),
+    sandbox.firewallLog().catch(() => ""),
+  ]);
+  findings.push(...proxy.findings);
+  return mergeContainment(proxy.entries, parseFirewallDrops(fwText, marks, windowStartMs), limitHits);
+}

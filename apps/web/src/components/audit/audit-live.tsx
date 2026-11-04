@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { LocalTime } from "@/components/local-time";
 import { type AuditEventView, type AuditView, isTerminal } from "@/lib/view";
 import { ApprovalPanel } from "./approval-panel";
 import { EventLog } from "./event-log";
@@ -111,7 +112,7 @@ export function AuditLive({ initial }: { initial: AuditView }) {
               ref <span className="font-mono">{src.ref}</span> ·{" "}
             </>
           ) : null}
-          started {new Date(view.createdAt).toLocaleString()}
+          started <LocalTime iso={view.createdAt} mode="datetime" />
           {!terminal ? <ConnIndicator conn={conn} /> : null}
         </p>
       </header>
