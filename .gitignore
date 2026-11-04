@@ -25,3 +25,6 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Demo targets intentionally commit a (fake) .env
+!demos/**/.env
