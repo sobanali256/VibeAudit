@@ -81,11 +81,13 @@ systemctl enable --now postgresql >/dev/null 2>&1
 systemctl restart postgresql
 if ! grep -q '^DATABASE_URL=' /etc/vibeaudit/env; then
   PGPASS=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
-  sudo -u postgres psql -q -v ON_ERROR_STOP=1 -v pw="$PGPASS" <<'SQL'
+  # Password goes in on stdin (alphanumeric, so safe inside quotes), never in argv.
+  { printf '\\set pw \x27%s\x27\n' "$PGPASS"; cat <<'SQL'
 SELECT 'CREATE ROLE vibeaudit LOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vibeaudit')\gexec
 ALTER ROLE vibeaudit PASSWORD :'pw';
 SELECT 'CREATE DATABASE vibeaudit OWNER vibeaudit' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'vibeaudit')\gexec
 SQL
+  } | sudo -u postgres psql -q -v ON_ERROR_STOP=1
   echo "DATABASE_URL=postgres://vibeaudit:${PGPASS}@127.0.0.1:5432/vibeaudit" >> /etc/vibeaudit/env
   unset PGPASS
 fi
@@ -93,8 +95,23 @@ grep -q '^SANDBOX_DOCKER_HOST=' /etc/vibeaudit/env || echo "SANDBOX_DOCKER_HOST=
 grep -q '^SANDBOX_PROXY_URL=' /etc/vibeaudit/env || echo "SANDBOX_PROXY_URL=http://${CP_VPC_IP}:8080" >> /etc/vibeaudit/env
 chmod 600 /etc/vibeaudit/env; chown root:root /etc/vibeaudit/env
 
-# Web gets only what it needs (today: the database). TODO: separate, narrower DB role.
-grep '^DATABASE_URL=' /etc/vibeaudit/env > /etc/vibeaudit/web.env
+# Web gets its own, narrower role (vibeaudit_web): it can read audits/events, create audits
+# and answer approvals, write but never read test keys, and run no DDL. The table grants are
+# applied by migrate() (packages/db WEB_GRANTS) on every worker start, so restart the worker
+# after this creates the role. Owns nothing, so it can't ALTER/DROP anything.
+if ! grep -q '^DATABASE_URL=postgres://vibeaudit_web:' /etc/vibeaudit/web.env 2>/dev/null; then
+  WEBPASS=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+  { printf '\\set pw \x27%s\x27\n' "$WEBPASS"; cat <<'SQL'
+SELECT 'CREATE ROLE vibeaudit_web LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vibeaudit_web')\gexec
+ALTER ROLE vibeaudit_web PASSWORD :'pw';
+ALTER ROLE vibeaudit_web SET statement_timeout = '15s';
+ALTER ROLE vibeaudit_web CONNECTION LIMIT 20;
+SQL
+  } | sudo -u postgres psql -q -v ON_ERROR_STOP=1
+  sudo -u postgres psql -q -v ON_ERROR_STOP=1 -d vibeaudit -c 'REVOKE CREATE ON SCHEMA public FROM PUBLIC'
+  echo "DATABASE_URL=postgres://vibeaudit_web:${WEBPASS}@127.0.0.1:5432/vibeaudit" > /etc/vibeaudit/web.env
+  unset WEBPASS
+fi
 chmod 600 /etc/vibeaudit/web.env; chown root:root /etc/vibeaudit/web.env
 
 # --- Caddy: HTTPS for the sslip.io name; admin API on a root-only unix socket ---
