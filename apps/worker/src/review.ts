@@ -2,6 +2,7 @@ import { z } from "zod";
 import { FindingCategory, type Finding } from "@vibeaudit/shared";
 import type { Sandbox } from "./sandbox";
 import type { LlmClient } from "./llm";
+import { maskSecrets } from "./secrets";
 
 // Source files collected from the sandbox for review. Everything here is UNTRUSTED (repo
 // content): it is only ever sliced and sent to the LLM, never evaluated on VM 1.
@@ -100,7 +101,7 @@ function numbered(content: string): string {
 }
 
 function buildUserPrompt(files: SourceFile[]): string {
-  return files.map((f) => `### ${f.path}\n${numbered(f.content)}`).join("\n\n");
+  return files.map((f) => `### ${f.path}\n${numbered(maskSecrets(f.content))}`).join("\n\n");
 }
 
 /** Pull the first top-level JSON array out of a model response (tolerating fences / stray prose). */

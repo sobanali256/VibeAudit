@@ -24,6 +24,7 @@ import {
 } from "@vibeaudit/db";
 import { type Plan, planFromManifest } from "./planner";
 import { collectSources, llmReview } from "./review";
+import { EXAMPLE_FILE, type SecretHit, bundleLeakFindings, bundleRoots, collectBundleFiles, collectRepoFiles, maskFinding, maskSecrets, scanFiles, secretFindings } from "./secrets";
 import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
@@ -110,11 +111,6 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     const manifest = await readManifest(sandbox, image, id);
     const plan = planFromManifest(manifest);
     await ev(sql, id, "log", { stage: "plan", msg: `framework=${plan.framework} pm=${plan.packageManager}` });
-    if (manifest.envFiles.length) {
-      findings.push(mkFinding("f-env", "high", "secret_exposure", "Committed environment file",
-        `The repo commits ${manifest.envFiles.join(", ")}, which usually holds secrets and should never be in version control.`,
-        true, [{ kind: "code", file: manifest.envFiles[0]!, snippet: "(.env present in the repository root)" }], "probe"));
-    }
     if (plan.framework === "unknown" || !plan.startCommand) {
       staticOnly = true;
       staticReason = "could not determine how to run this project";
@@ -139,6 +135,29 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // --- static: review the repo source (before install, so no node_modules noise). Always
     // runs, even for a static-only audit. Best effort: a review failure never fails the audit. ---
     await enter("static");
+    let repoHits: SecretHit[] = [];
+    let envScanned = false;
+    try {
+      const got = await collectRepoFiles(sandbox, image, id);
+      repoHits = scanFiles(got.files, { framework: plan.framework });
+      // Only a complete walk vouches for the env file (a partial one may have stopped first).
+      envScanned = !got.partial;
+      const secretFs = secretFindings(repoHits);
+      findings.push(...secretFs);
+      await ev(sql, id, "log", { stage: "static", msg: `secret scan: ${secretFs.length} finding(s) from ${got.files.length} candidate file(s)${got.partial ? " (partial: output budget reached)" : ""}` });
+    } catch (e) {
+      await ev(sql, id, "log", { stage: "static", msg: `secret scan skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
+    }
+    // A committed env file (not an .example) with no recognisable secret in it is still worth a
+    // note; one with secrets is covered by the secret findings themselves.
+    const realEnv = manifest.envFiles.filter((f) => !EXAMPLE_FILE.test(f));
+    // By file, not by `where`: a NEXT_PUBLIC_ line in .env is classed "browser" but still covers it.
+    if (realEnv.length && !repoHits.some((h) => /^\.env/.test(h.file.split(/[/\\]/).pop() ?? ""))) {
+      findings.push(mkFinding("f-env", "medium", "secret_exposure", "Committed environment file",
+        `The repo commits ${realEnv.join(", ")}. Env files usually hold secrets and belong in .gitignore; ` +
+          (envScanned ? "no recognisable key was found in it, but check it by hand." : "the secret scan could not check it, so check it by hand."),
+        true, [{ kind: "code", file: realEnv[0]!, snippet: "(environment file present in the repository root)" }], "secret_scan"));
+    }
     if (deps.llm) {
       try {
         const sources = await collectSources(sandbox, image, id);
@@ -186,6 +205,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         await ev(sql, id, "log", { stage: "build", msg: tailLog(build) });
         if (build.timedOut) limitHit("build", `build exceeded ${STAGE_TIMEOUTS_MS.buildPerTry / 1000}s and was killed`);
         if (build.code !== 0) { staticOnly = true; staticReason = build.timedOut ? "build timed out" : "build failed"; }
+        else await scanBundle(sandbox, image, id, plan.framework, sql, findings, repoHits, plantedEnv(plan, canaries, id, testKeys));
       }
 
       // --- run + dynamic probing ---
@@ -230,7 +250,8 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       mode: staticOnly ? "static_only" : "runtime",
       staticOnlyReason: staticReason,
       score: scoreFrom(findings),
-      findings,
+      // Masked here, once, so no secret value from the repo or the app reaches the stored report.
+      findings: findings.map(maskFinding),
       containment,
       startedAt,
       finishedAt: new Date().toISOString(),
@@ -243,7 +264,8 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       await ev(sql, id, "cancelled", {});
       return;
     }
-    const message = err instanceof Error ? err.message : String(err);
+    // Error text can carry sandbox stderr (e.g. "unpack failed: ..."): mask before storing it.
+    const message = maskSecrets((err instanceof Error ? err.message : String(err)).slice(0, 4000));
     // Keep what the sandbox did even when the audit fails: a hostile install that exfils and
     // then hangs is exactly the case whose containment log matters most.
     let partial: Report | undefined;
@@ -258,7 +280,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         mode: marks.some((m) => m.stage === "install") ? "runtime" : "static_only",
         staticOnlyReason: `the audit failed: ${message.slice(0, 300)}`,
         score: scoreFrom(findings),
-        findings,
+        findings: findings.map(maskFinding),
         containment,
         startedAt,
         finishedAt: new Date().toISOString(),
@@ -580,7 +602,10 @@ function scoreFrom(findings: Finding[]): number {
 }
 
 function tailLog(r: { stdout: string; stderr: string }): string {
-  return (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).slice(-2000);
+  // Build output can print env values or keys: mask before it goes to the live event stream.
+  // Mask a wider tail than we keep: a 2000-char window that starts mid-key would lose the prefix
+  // the masker keys on. Only the tail, not the whole (sandbox-sized) log: masking costs CPU on VM 1.
+  return maskSecrets((r.stdout + (r.stderr ? `\n${r.stderr}` : "")).slice(-4000)).slice(-2000);
 }
 
 export { SandboxError, probe as _probeForTest };
@@ -610,4 +635,30 @@ async function assembleContainment(
   // threw, and must not find these findings already added.
   findings.push(...proxy.findings, ...egressFindings([...proxy.entries, ...fw]));
   return merged;
+}
+
+/** What the build env actually planted (canaries + key placeholders), minus fixed settings. */
+function plantedEnv(plan: Plan, canaries: Record<string, string>, id: string, testKeys: Record<string, string>): Record<string, string> {
+  const env = sandboxEnv(plan, canaries, id, testKeys, true);
+  for (const k of Object.keys(TELEMETRY_OPT_OUT)) delete env[k];
+  return env;
+}
+
+/**
+ * After a successful build: scan what will be served to browsers for secrets and for the env
+ * markers the build was given. Best effort: never fails the audit.
+ */
+async function scanBundle(sandbox: Sandbox, image: string, id: string, framework: string, sql: Sql, findings: Finding[], repoHits: readonly SecretHit[], planted: Record<string, string>): Promise<void> {
+  try {
+    if (!bundleRoots(framework).length) return; // server-only build output: not a client bundle
+    const got = await collectBundleFiles(sandbox, image, id, framework, Object.values(planted));
+    // A secret the repo scan already reported (anywhere) isn't reported twice.
+    const known = new Set(repoHits.map((h) => h.fingerprint));
+    const hits = scanFiles(got.files, { framework, bundle: true }).filter((h) => !known.has(h.fingerprint));
+    const out = [...bundleLeakFindings(got.found, planted), ...secretFindings(hits, { bundle: true })];
+    findings.push(...out);
+    await ev(sql, id, "log", { stage: "build", msg: `bundle scan: ${out.length} finding(s) from ${got.files.length} candidate file(s)${got.partial ? " (partial: output budget reached)" : ""}` });
+  } catch (e) {
+    await ev(sql, id, "log", { stage: "build", msg: `bundle scan skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
+  }
 }
