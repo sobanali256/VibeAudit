@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { llmReview, collectSources, type SourceFile } from "./review";
-import type { LlmClient } from "./llm";
+import { type LlmClient, createLlm } from "./llm";
 import type { Sandbox, ExecResult, RunSpec } from "./sandbox";
 
 const fixedLlm = (reply: string): LlmClient => ({ async complete() { return reply; } });
@@ -62,6 +62,69 @@ describe("llmReview", () => {
   it("returns [] when the LLM call throws (inference down), never rejects", async () => {
     const llm: LlmClient = { async complete() { throw new Error("inference HTTP 503"); } };
     await expect(llmReview(files, llm)).resolves.toEqual([]);
+  });
+
+  it("asks once more after an empty reply, with capped reasoning, and stops at two tries", async () => {
+    const seen: (string | undefined)[] = [];
+    const replies = ["", '[{"title":"XSS","severity":"high","file":"a.js","line":1}]'];
+    const llm: LlmClient = { async complete(o) { seen.push(o.reasoningEffort); return replies.shift() ?? ""; } };
+    const fs = await llmReview(files, llm);
+    expect(fs).toHaveLength(1);
+    expect(seen).toEqual(["medium", "medium"]);
+    let calls = 0;
+    const empty: LlmClient = { async complete() { calls++; return ""; } };
+    expect(await llmReview(files, empty)).toEqual([]);
+    expect(calls).toBe(2);
+  });
+
+  it("retries without the reasoning field after a 4xx, and keeps it after other errors", async () => {
+    const seen: (string | undefined)[] = [];
+    const ok = '[{"title":"XSS","severity":"high","file":"a.js","line":1}]';
+    const rejecting: LlmClient = {
+      async complete(o) {
+        seen.push(o.reasoningEffort);
+        if (o.reasoningEffort) throw new Error("inference HTTP 400");
+        return ok;
+      },
+    };
+    expect(await llmReview(files, rejecting)).toHaveLength(1);
+    expect(seen).toEqual(["medium", undefined]);
+    seen.length = 0;
+    let n = 0;
+    const flaky: LlmClient = {
+      async complete(o) {
+        seen.push(o.reasoningEffort);
+        if (n++ === 0) throw new Error("inference HTTP 503");
+        return ok;
+      },
+    };
+    expect(await llmReview(files, flaky)).toHaveLength(1);
+    expect(seen).toEqual(["medium", "medium"]);
+  });
+
+  it("createLlm sends reasoning_effort only when asked", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "[]" } }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const llm = createLlm({ baseUrl: "https://x/v1", apiKey: "k", model: "m" });
+      await llm.complete({ system: "s", user: "u", reasoningEffort: "medium" });
+      await llm.complete({ system: "s", user: "u" });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(bodies[0]!.reasoning_effort).toBe("medium");
+    expect("reasoning_effort" in bodies[1]!).toBe(false);
+  });
+
+  it("a valid empty array is an answer, not a failure (no retry)", async () => {
+    let calls = 0;
+    const llm: LlmClient = { async complete() { calls++; return "[]"; } };
+    expect(await llmReview(files, llm)).toEqual([]);
+    expect(calls).toBe(1);
   });
 
   it("returns [] with no files (never calls the model)", async () => {

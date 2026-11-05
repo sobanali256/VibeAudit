@@ -5,8 +5,16 @@
 
 export interface LlmClient {
   /** One non-streaming completion. Returns the assistant message content (may be empty). */
-  complete(opts: { system: string; user: string; maxTokens?: number; timeoutMs?: number; images?: readonly Buffer[] }): Promise<string>;
+  complete(opts: { system: string; user: string; maxTokens?: number; timeoutMs?: number; images?: readonly Buffer[]; reasoningEffort?: ReasoningEffort }): Promise<string>;
 }
+
+/**
+ * OpenAI-style `reasoning_effort`. glm-5.3 on Vultr otherwise reasons at length in a hidden
+ * field before answering: 47-88 s per review, and about 1 in 3 replies used the whole token
+ * budget on reasoning and came back with empty content. With it set, the same review returned
+ * a full answer in ~6 s on every try.
+ */
+export type ReasoningEffort = "low" | "medium" | "high";
 
 export interface LlmConfig {
   baseUrl: string;
@@ -16,7 +24,7 @@ export interface LlmConfig {
 
 export function createLlm(cfg: LlmConfig): LlmClient {
   return {
-    async complete({ system, user, maxTokens = 1500, timeoutMs = 60_000, images }) {
+    async complete({ system, user, maxTokens = 1500, timeoutMs = 60_000, images, reasoningEffort }) {
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), timeoutMs);
       try {
@@ -27,6 +35,7 @@ export function createLlm(cfg: LlmConfig): LlmClient {
             model: cfg.model,
             temperature: 0,
             max_tokens: maxTokens,
+            ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
             messages: [
               { role: "system", content: system },
               {

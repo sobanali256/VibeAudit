@@ -132,16 +132,22 @@ function lineSnippet(files: SourceFile[], file: string | undefined, line: number
  */
 export async function llmReview(files: SourceFile[], llm: LlmClient): Promise<Finding[]> {
   if (files.length === 0) return [];
-  let raw: string;
-  try {
-    // glm-5.3 is a reasoning model: it spends most of the completion budget on message.reasoning
-    // before emitting the JSON in message.content. Too small a cap => it stops mid-reasoning with
-    // empty content (finish_reason=length) and we get zero findings. Give it ample headroom.
-    raw = await llm.complete({ system: SYSTEM_PROMPT, user: buildUserPrompt(files), maxTokens: 8000, timeoutMs: 90_000 });
-  } catch {
-    return [];
+  // glm-5.3 is a reasoning model. Left alone it can spend the whole completion budget on hidden
+  // reasoning and return empty content (zero findings, silently, about 1 run in 3), so cap its
+  // reasoning, keep generous headroom, and ask once more if a reply still isn't a JSON array.
+  const user = buildUserPrompt(files);
+  let arr: unknown;
+  let effort: "medium" | undefined = "medium";
+  for (let attempt = 0; attempt < 2 && !Array.isArray(arr); attempt++) {
+    try {
+      const raw = await llm.complete({ system: SYSTEM_PROMPT, user, maxTokens: 8000, timeoutMs: 60_000, reasoningEffort: effort });
+      arr = extractJsonArray(raw);
+    } catch (e) {
+      // A model that rejects the reasoning field (HTTP 4xx) gets one try without it; otherwise
+      // (down, timed out) one plain retry, then give up: the audit never fails on this.
+      if (/HTTP 4\d\d/.test(String((e as Error)?.message))) effort = undefined;
+    }
   }
-  const arr = extractJsonArray(raw);
   if (!Array.isArray(arr)) return [];
 
   const findings: Finding[] = [];
