@@ -41,11 +41,33 @@ describe("planFromManifest", () => {
   });
 
   it("maps known provider deps to placeholder env, unknown to canary", () => {
-    const p = planFromManifest(m({ dependencies: { express: "4", openai: "6", stripe: "18" } }), { declaredEnvNames: ["CUSTOM_THING"] });
+    const p = planFromManifest(m({ dependencies: { express: "4", openai: "6", stripe: "18" } }), { declaredEnvNames: ["CUSTOM_SECRET", "CUSTOM_THING"] });
     const byName = Object.fromEntries(p.env.map((e) => [e.name, e.provide]));
     expect(byName.OPENAI_API_KEY).toBe("placeholder");
     expect(byName.STRIPE_SECRET_KEY).toBe("placeholder");
-    expect(byName.CUSTOM_THING).toBe("canary");
+    expect(byName.CUSTOM_SECRET).toBe("canary");
+    expect(byName.CUSTOM_THING).toBe("empty");
+  });
+
+  it("leaves addresses and modes unset, caps and filters declared names", () => {
+    const p = planFromManifest(m({ dependencies: { express: "4" } }), {
+      declaredEnvNames: [
+        "DATABASE_URL", "REDIS_HOST", "API_BASE", "SUPABASE_ANON_KEY", "JWT_SECRET", "LOG_LEVEL", "bad-name", "lower",
+        "OPENAI_MODEL", "JWT_EXPIRES_IN", "MAX_TOKENS", "CI", "ENABLE_SIGNUP", "RESEND_KEY", "SUPABASE_SERVICE_ROLE_KEY",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY", "NEXT_PUBLIC_APP_NAME", "SESSION_SECRET", "DB_PASSWORD", "MONGODB_URI", "SMTP_PASS",
+      ],
+    });
+    const byName = Object.fromEntries(p.env.map((e) => [e.name, e.provide]));
+    expect(byName).toEqual({
+      DATABASE_URL: "empty", REDIS_HOST: "empty", API_BASE: "empty", SUPABASE_ANON_KEY: "canary", JWT_SECRET: "canary", LOG_LEVEL: "empty",
+      OPENAI_MODEL: "empty", JWT_EXPIRES_IN: "empty", MAX_TOKENS: "empty", CI: "empty", ENABLE_SIGNUP: "empty", RESEND_KEY: "canary",
+      SUPABASE_SERVICE_ROLE_KEY: "canary", NEXT_PUBLIC_SUPABASE_ANON_KEY: "empty", NEXT_PUBLIC_APP_NAME: "empty", SESSION_SECRET: "canary",
+      DB_PASSWORD: "canary", MONGODB_URI: "empty", SMTP_PASS: "canary",
+    });
+    const many = planFromManifest(m({ dependencies: { openai: "6" } }), { declaredEnvNames: Array.from({ length: 100 }, (_, i) => `SECRET_${i}`) });
+    // 60 declared + the provider key the SDK implies (always kept).
+    expect(many.env).toHaveLength(61);
+    expect(many.env.some((e) => e.name === "OPENAI_API_KEY")).toBe(true);
   });
 
   it("uses a bootstrap install without a lockfile, and ignores lookalike filenames", () => {

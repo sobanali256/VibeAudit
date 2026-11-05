@@ -170,6 +170,15 @@ describe("bundle scan", () => {
     expect(bundleLeakFindings({ AKIAVIBE999999999999999999: ["a.js"] }, sec)[0]!.severity).toBe("critical");
   });
 
+  it("does not flag non-secret config inlined into the bundle (APP_VERSION via next.config env)", () => {
+    const planted = { APP_VERSION: "AKIAVIBE111111111111111111", BUILD_FLAVOR: "AKIAVIBE222222222222222222" };
+    const found = { AKIAVIBE111111111111111111: ["a.js"], AKIAVIBE222222222222222222: ["a.js"] };
+    expect(bundleLeakFindings(found, planted)).toEqual([]);
+    // ...but a name the planner gave a canary (non-public *_KEY) is reported when it shows up.
+    const key = { RESEND_KEY: "AKIAVIBE333333333333333333" };
+    expect(bundleLeakFindings({ AKIAVIBE333333333333333333: ["a.js"] }, key)[0]!.severity).toBe("critical");
+  });
+
   it("bundle secret findings use bundle evidence", () => {
     const hits = scanFiles(F([{ path: "dist/assets/index.js", content: `x="${STRIPE_LIVE}"` }]), { framework: "", bundle: true });
     const f = Finding.parse(secretFindings(hits, { bundle: true })[0]);

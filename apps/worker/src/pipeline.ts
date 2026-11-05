@@ -4,6 +4,7 @@ import {
   type AuditStage,
   type ContainmentEntry,
   type Finding,
+  ENV_VAR_RE,
   KEY_PROVIDERS,
   type PageVisit,
   type ProxyState,
@@ -26,7 +27,7 @@ import {
   requestApproval,
   type Sql,
 } from "@vibeaudit/db";
-import { type Plan, planFromManifest } from "./planner";
+import { MAX_DECLARED_ENV, type Plan, planFromManifest } from "./planner";
 import { collectSources, llmReview } from "./review";
 import { type OsvClient, type PackageList, dependencyFindings, listPackages, mergePackageLists } from "./deps";
 import { EXAMPLE_FILE, type SecretHit, bundleLeakFindings, bundleRoots, collectBundleFiles, collectRepoFiles, maskFinding, maskSecrets, scanFiles, secretFindings } from "./secrets";
@@ -159,7 +160,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // --- plan: read the manifest from the sandbox, decide how to run it ---
     await enter("plan");
     const manifest = await readManifest(sandbox, image, id);
-    const plan = planFromManifest(manifest);
+    const plan = planFromManifest(manifest, { declaredEnvNames: manifest.envNames });
     await ev(sql, id, "log", { stage: "plan", msg: `framework=${plan.framework} pm=${plan.packageManager}` });
     if (plan.framework === "unknown" || !plan.startCommand) {
       staticOnly = true;
@@ -260,7 +261,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     if (!staticOnly) {
       // --- install (read-only egress: registries, GET/HEAD only) ---
       await enter("install");
-      await setProxy({ auditId: id, stage: "install", keys: {}, canaries: Object.values(canaries) });
+      await setProxy({ auditId: id, stage: "install", keys: {}, canaries: watchedCanaries(canaries, "install") });
       const install = await sandbox.run({
         role: "app",
         image,
@@ -288,7 +289,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       // --- build (if any) ---
       if (!staticOnly && plan.buildCommand) {
         await enter("build");
-        await setProxy({ auditId: id, stage: "build", keys: {}, canaries: Object.values(canaries) });
+        await setProxy({ auditId: id, stage: "build", keys: {}, canaries: watchedCanaries(canaries, "build") });
         const build = await sandbox.run({
           role: "app",
           image,
@@ -306,7 +307,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       // --- run + dynamic probing ---
       if (!staticOnly && plan.startCommand) {
         await enter("run");
-        await setProxy({ auditId: id, stage: "run", keys: proxyKeys(testKeys), canaries: Object.values(canaries) });
+        await setProxy({ auditId: id, stage: "run", keys: proxyKeys(testKeys), canaries: watchedCanaries(canaries, "run") });
         const appName = await sandbox.start({
           role: "app",
           image,
@@ -460,19 +461,60 @@ async function stage(sql: Sql, id: string, name: AuditStage): Promise<void> {
   await ev(sql, id, "stage", { stage: name });
 }
 
+/**
+ * Runs in the sandbox (repo code never runs on VM 1). Besides package.json and the root file
+ * list, it collects the env var NAMES the app declares (root env files such as .env.example)
+ * or reads in code (process.env.X, import.meta.env.X). Only names leave the sandbox (the
+ * inside of quoted multi-line values is skipped), never a value from a committed env file. Bounded by depth, file count, size and an 8 s budget.
+ */
+export const MANIFEST_SCRIPT = String.raw`
+const fs=require("fs"),path=require("path");
+const r=p=>{try{return fs.readFileSync(p,"utf8")}catch{return null}};
+const ls=fs.existsSync(".")?fs.readdirSync("."):[];
+const names=new Map();
+const add=n=>{if(n&&names.size<60&&/^[A-Z][A-Z0-9_]{0,63}$/.test(n)&&!names.has(n))names.set(n,1)};
+for(const f of ls){
+  if(!/^\.env/.test(f)&&!/^(?:example|sample)\.env$/.test(f))continue;
+  let t;try{const st=fs.lstatSync(f);if(!st.isFile()||st.size>65536)continue;t=fs.readFileSync(f,"utf8")}catch{continue}
+  // Skip the inside of quoted multi-line values (a PEM body line like "QW8Z=" is not a name).
+  let open=null;
+  for(const line of t.split(/\r?\n/)){
+    if(open){if(line.includes(open))open=null;continue}
+    const m=/^[ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*)[ \t]*=[ \t]*(["']?)(.*)$/.exec(line);
+    if(!m)continue;
+    add(m[1]);
+    if(m[2]&&!m[3].includes(m[2]))open=m[2];
+  }
+}
+const SKIP=new Set(["node_modules","dist","build","out","coverage"]);
+const RE=/(?:process\.env|import\.meta\.env)(?:\??\.([A-Z][A-Z0-9_]*)(?![A-Za-z0-9_$])|\[\s*["'\x60]([A-Z][A-Z0-9_]*)["'\x60]\s*\])/g;
+let files=0;const deadline=Date.now()+8000;
+const walk=(d,depth)=>{
+  if(depth>8||files>3000||Date.now()>deadline)return;
+  let es;try{es=fs.readdirSync(d,{withFileTypes:true})}catch{return}
+  for(const e of es){
+    if(e.isSymbolicLink())continue;
+    const p=path.join(d,e.name);
+    if(e.isDirectory()){if(!SKIP.has(e.name)&&!e.name.startsWith("."))walk(p,depth+1);continue}
+    if(!e.isFile()||!/\.(?:[cm]?[jt]sx?|vue|svelte|astro)$/.test(e.name))continue;
+    files++;
+    let t;try{if(fs.statSync(p).size>262144)continue;t=fs.readFileSync(p,"utf8")}catch{continue}
+    for(const m of t.matchAll(RE))add(m[1]||m[2]);
+  }
+};
+walk(".",0);
+process.stdout.write(JSON.stringify({pkg:r("package.json"),lockfiles:ls.filter(f=>/(lock|shrinkwrap)/.test(f)),envFiles:ls.filter(f=>/^\.env/.test(f)),envNames:[...names.keys()]}));
+`;
+
 async function readManifest(sandbox: Sandbox, image: string, id: string) {
-  const script =
-    'const fs=require("fs");const r=p=>{try{return fs.readFileSync(p,"utf8")}catch{return null}};' +
-    'const ls=fs.existsSync(".")?fs.readdirSync("."):[];' +
-    'process.stdout.write(JSON.stringify({pkg:r("package.json"),lockfiles:ls.filter(f=>/(lock|shrinkwrap)/.test(f)),envFiles:ls.filter(f=>/^\\.env/.test(f))}))';
   const r = await sandbox.run({
     role: "app",
     image,
-    cmd: ["node", "-e", script],
+    cmd: ["node", "-e", MANIFEST_SCRIPT],
     timeoutMs: 20_000,
     name: `va-${id}-manifest`,
   });
-  let parsed: { pkg: string | null; lockfiles: string[]; envFiles: string[] };
+  let parsed: { pkg: string | null; lockfiles: string[]; envFiles: string[]; envNames?: unknown };
   try {
     parsed = JSON.parse(r.stdout.trim() || "{}");
   } catch {
@@ -486,7 +528,7 @@ async function readManifest(sandbox: Sandbox, image: string, id: string) {
       throw new Error("package.json is not valid JSON");
     }
   }
-  return { packageJson, lockfiles: parsed.lockfiles ?? [], envFiles: parsed.envFiles ?? [] };
+  return { packageJson, lockfiles: parsed.lockfiles ?? [], envFiles: parsed.envFiles ?? [], envNames: declaredEnvNames(parsed.envNames) };
 }
 
 function buildApprovalRequest(id: string, plan: Plan, manifest: { packageJson: Record<string, unknown> }): ApprovalRequest {
@@ -541,6 +583,9 @@ export function isReservedEnv(name: string): boolean {
     /^(?:https?|no|all)_proxy$/i.test(name) ||
     /^(?:YARN|NODE|NPM_CONFIG|PNPM)_/i.test(name) ||
     ["SSL_CERT_FILE", "PORT", "PATH", "HOME"].includes(name) ||
+    // Registry/git auth: .npmrc's ${NPM_TOKEN} would send a canary to the registry at install,
+    // a false "exfiltration". Without a value npm just fails auth, which is the honest outcome.
+    ["NPM_TOKEN", "NPM_AUTH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "BUN_AUTH_TOKEN"].includes(name) ||
     Object.hasOwn(TELEMETRY_OPT_OUT, name)
   );
 }
@@ -551,8 +596,34 @@ function planCanaries(plan: Plan, id: string): Record<string, string> {
   for (const e of plan.env) {
     if (e.provide === "canary" && !isReservedEnv(e.name)) out[e.name] = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
   }
-  // Always plant at least one canary so exfil detection is live even with no declared env.
-  if (Object.keys(out).length === 0) out.VIBEAUDIT_CANARY = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
+  // Always plant the generic canary: the app never reads it, so it leaving the sandbox in any
+  // stage means something dumped the environment.
+  out[GENERIC_CANARY] = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
+  return out;
+}
+
+const GENERIC_CANARY = "VIBEAUDIT_CANARY";
+
+/**
+ * Which canaries the proxy treats as exfiltration in a stage. Install: all of them, since no
+ * install step has a reason to send an env value anywhere. Build and run: only the generic one.
+ * There an app sending its own configured key to its own API (a CMS token at build, a Supabase
+ * key at run) is normal behaviour, and flagging it would be a false critical. Those requests
+ * are still blocked by the host allowlist; they just aren't reported as theft.
+ */
+export function watchedCanaries(canaries: Record<string, string>, st: "install" | "build" | "run"): string[] {
+  if (st === "install") return Object.values(canaries);
+  return canaries[GENERIC_CANARY] ? [canaries[GENERIC_CANARY]] : [];
+}
+
+/** Env names reported by the sandbox: untrusted, so shape-checked and capped here. */
+export function declaredEnvNames(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const n of v) {
+    if (out.length >= MAX_DECLARED_ENV) break;
+    if (typeof n === "string" && ENV_VAR_RE.test(n) && n !== GENERIC_CANARY && !out.includes(n)) out.push(n);
+  }
   return out;
 }
 
@@ -825,6 +896,9 @@ async function assembleContainment(
 function plantedEnv(plan: Plan, canaries: Record<string, string>, id: string, testKeys: Record<string, string>): Record<string, string> {
   const env = sandboxEnv(plan, canaries, id, testKeys, true);
   for (const k of Object.keys(TELEMETRY_OPT_OUT)) delete env[k];
+  // The generic canary is a tripwire for env dumps, not an app setting: a bundler that inlines
+  // the whole env is still caught through the named secrets it inlines along with it.
+  delete env[GENERIC_CANARY];
   return env;
 }
 

@@ -1,4 +1,5 @@
 import { ENV_VAR_RE, KEY_PROVIDERS } from "@vibeaudit/shared";
+import { canaryWorthy } from "./secrets";
 
 /**
  * Heuristic planner. Decides how to install/build/run a repo from its package.json and which
@@ -73,13 +74,18 @@ const CI_INSTALL: Partial<Record<PackageManager, string>> = {
   pnpm: "pnpm install --frozen-lockfile",
 };
 
-/** Guess which env vars the app expects from the bundle's dependencies + any committed .env. */
+/** Cap on declared env names taken from the repo (it controls the list). */
+export const MAX_DECLARED_ENV = 60;
+
+export { canaryWorthy };
+
+/** Which env vars the app expects: names the repo declares or reads, plus provider SDK keys. */
 function detectEnv(
   deps: Record<string, string>,
   envFiles: string[] | undefined,
   declaredEnvNames: string[],
 ): Plan["env"] {
-  const names = new Set<string>(declaredEnvNames.filter((n) => ENV_VAR_RE.test(n)));
+  const names = new Set<string>(declaredEnvNames.filter((n) => ENV_VAR_RE.test(n)).slice(0, MAX_DECLARED_ENV));
   // Dependencies that imply a provider key.
   if (deps.openai) names.add("OPENAI_API_KEY");
   if (deps["@anthropic-ai/sdk"]) names.add("ANTHROPIC_API_KEY");
@@ -87,8 +93,9 @@ function detectEnv(
   if (deps["@google/generative-ai"] || deps["@google/genai"]) names.add("GEMINI_API_KEY");
   return [...names].map((name) => ({
     name,
-    // Offer a real test key only for providers we know the host for; otherwise a canary stub.
-    provide: Object.hasOwn(KEY_PROVIDERS, name) ? "placeholder" : "canary",
+    // Offer a real test key only for providers we know the host for; otherwise a canary stub
+    // (or nothing, for config that isn't a secret).
+    provide: Object.hasOwn(KEY_PROVIDERS, name) ? "placeholder" : canaryWorthy(name) ? "canary" : "empty",
   }));
 }
 

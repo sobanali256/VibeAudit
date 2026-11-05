@@ -106,7 +106,7 @@ describe("probe", () => {
 
 describe("isReservedEnv", () => {
   it("reserves the names the sandbox sets itself", () => {
-    for (const n of ["HTTPS_PROXY", "http_proxy", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "YARN_HTTPS_PROXY", "npm_config_cafile", "SSL_CERT_FILE", "PORT", "DO_NOT_TRACK", "NEXT_TELEMETRY_DISABLED", "PNPM_STORE_DIR"]) {
+    for (const n of ["HTTPS_PROXY", "http_proxy", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "YARN_HTTPS_PROXY", "npm_config_cafile", "SSL_CERT_FILE", "PORT", "DO_NOT_TRACK", "NEXT_TELEMETRY_DISABLED", "PNPM_STORE_DIR", "NPM_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]) {
       expect(isReservedEnv(n), n).toBe(true);
     }
   });

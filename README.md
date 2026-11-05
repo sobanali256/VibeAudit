@@ -19,7 +19,7 @@ Live: **https://108-61-149-76.sslip.io**
 | **Secrets** in the repo, a committed `.env` or the client bundle | pattern scan of the source and of the built bundle (`.next/static`, `dist`). The build is seeded with marker values, so a server secret that leaks into browser code is caught | code line (values masked) |
 | **Malicious install scripts** | static read of every `preinstall`/`install`/`postinstall` hook (the repo's and its dependencies') down to the code it runs. Flagged even when the audit installs with `--ignore-scripts` | code lines |
 | **Supply-chain behaviour at install/build** | the sandbox logs the connections it blocks; blocked egress during install or build is a finding | firewall or proxy log row |
-| **Secret exfiltration** | a canary value is planted in the env; if it leaves the sandbox the proxy catches it | proxy log row |
+| **Secret exfiltration** | canary values are planted in the env; if one leaves the sandbox the proxy catches it | proxy log row |
 | **Known-vulnerable and known-malicious packages** | installed package list checked against OSV.dev (`MAL-*` advisories are critical) | advisory + version |
 | **Logic flaws you can't prove by running** (plaintext password checks, `innerHTML` XSS…) | LLM code review, reported as *unconfirmed* and weighted at half | code line |
 
@@ -37,9 +37,10 @@ intake → plan → approve → static → install → build → run → dynamic
 ```
 
 1. **intake:** resolve the repo and stream its tarball from GitHub straight into the sandbox. The control plane never unpacks it.
-2. **plan:** read `package.json` in the sandbox and detect the framework, package manager and install/build/start commands. The app is started with `PORT=3000`. It gets planted values, never real ones:
-   - a canary (`AKIAVIBE…`) that makes exfiltration visible;
-   - for known API-key vars (OpenAI, Anthropic, Stripe, Gemini), a placeholder, but only when the user supplies a test key.
+2. **plan:** read `package.json` in the sandbox and detect the framework, package manager and install/build/start commands. The app is started with `PORT=3000`. The plan also collects the env var *names* the repo declares (`.env.example` and other root env files) or reads in code (`process.env.X`, `import.meta.env.X`). Only names leave the sandbox, never values. The app gets planted values, never real ones:
+   - a canary (`AKIAVIBE…`) for each secret-looking name (`JWT_SECRET`, `DB_PASSWORD`, `*_KEY`…), plus a generic `VIBEAUDIT_CANARY` the app never reads;
+   - for known API-key vars (OpenAI, Anthropic, Stripe, Gemini), a placeholder, but only when the user supplies a test key;
+   - nothing for config (`OPENAI_MODEL`, `MAX_TOKENS`, `DATABASE_URL`, flags), so the app's own defaults apply.
 3. **approve:** the audit pauses for a human. The UI shows the exact commands, the env plan and the repo's own install hooks. The user can approve (optionally with `--ignore-scripts` and their own test keys), choose a static-only audit, or cancel.
 4. **static:** secret scan, install-script scan of the repo's hooks, LLM review and a pre-install package snapshot. These happen before any repo code runs, so a hostile install can't rewrite what gets read. Dependencies' install hooks are read from `node_modules` right after install.
 5. **install / build / run:** each step runs in its own gVisor container with time and resource caps. Egress goes only through the proxy, whose rules tighten per stage.
@@ -103,7 +104,7 @@ flowchart LR
   - At run time the only hosts allowed are the ones the user's test keys are scoped to; with no keys, nothing is.
   - Allowed, blocked and dropped connections are recorded in the report's containment log (repeats are rate-limited and counted).
 - **Keys never enter the sandbox.** The app sees `sk-PLACEHOLDER-<VAR>-<auditId>`. The proxy swaps in the user's real test key only on requests to that provider's own hosts.
-  - A canary value (`AKIAVIBE…`) in the env makes exfiltration attempts visible.
+  - Canary values (`AKIAVIBE…`) in the env make exfiltration attempts visible. During install, any canary leaving counts, since no install step needs to send env values anywhere. During build and run, only the generic canary counts: there an app sending its own configured key to its own API is normal, so that request is blocked but not reported as theft.
 - **Least privilege on VM 1.**
   - The web app runs as its own user and can't read the worker's SSH key or the proxy directory, or use Docker.
   - The worker's key into VM 2 is restricted to the VPC source address and forced to `docker system dial-stdio`.

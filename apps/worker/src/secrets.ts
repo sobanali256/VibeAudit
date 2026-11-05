@@ -252,7 +252,7 @@ const ASSIGN_RE = /\b([A-Za-z0-9_]{0,40}?(?:secret|passw(?:or)?d|pwd|api_?key|ap
 /** Credential-looking names that hold something else (a URL, a header name, a hash, an id...). */
 const NOT_A_SECRET_NAME = /(?:url|uri|endpoint|path|regex|pattern|hash|hashed|header|name|field|label|type|id|ids|placeholder|input|class|classname|style|mode|format|length|len|count|expiry|expires|expiresin|ttl|cookie|storagekey|storage|key_name|prefix|version|ver|csrf|csrftoken|xsrf|xsrftoken|event|events|route|routes|scope|scopes|status|algo|algorithm|alg|digest|cipher|encoding|sha256|hex|base64|env)$/i;
 const ENV_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']?([^"'\s#]{8,500})["']?\s*(?:#.*)?$/;
-const SECRETISH_NAME = /secret|passw(?:or)?d|pwd|api_?key|apikey|token|private|auth|access_?key|credential|dsn|database_url|connection|signing|encrypt|jwt_?key|master_?key|hmac/i;
+const SECRETISH_NAME = /secret|passw(?:or)?d|pwd|_pass$|api_?key|apikey|token|private|auth|access_?key|credential|dsn|database_url|connection|signing|encrypt|jwt_?key|master_?key|hmac/i;
 /** For public-prefixed names only words that can't be public count (DSNs, anon/maps keys are public by design). */
 const STRONG_SECRET_NAME = /secret|private|service_?role|passw(?:or)?d|pwd/i;
 const PUBLIC_BY_DESIGN = /dsn|anon|publishable|firebase|maps|mapbox|algolia|posthog|sentry|analytics|measurement|recaptcha_site|site_?key|client_?id/i;
@@ -293,6 +293,20 @@ export function secretEnvName(name: string): boolean {
     return STRONG_SECRET_NAME.test(rest) && !PUBLIC_BY_DESIGN.test(rest);
   }
   return SECRETISH_NAME.test(name);
+}
+
+/**
+ * Which env names the sandbox plants a canary for (planner) and reports when one shows up in
+ * the client bundle (bundleLeakFindings): one rule for both. Only secret-looking names: a canary
+ * in OPENAI_MODEL, JWT_EXPIRES_IN, MAX_TOKENS or CI would break the app, and canaries only matter
+ * where a leak would be a real one. Connection strings stay unset too: a canary there is parsed
+ * (and fails) or dialled as a hostname, never sent as a credential.
+ */
+export function canaryWorthy(name: string): boolean {
+  if (/(?:_UR[LI]|_DSN|CONNECTION(?:_STRING)?)$/.test(name)) return false;
+  // Numbers, durations, model names and flags (MAX_TOKENS, TOKEN_EXPIRES_IN, OPENAI_MODEL).
+  if (/(?:^|_)(?:MAX|MIN|LIMIT|COUNT|NUM|SIZE|LENGTH|TIMEOUT|TTL|EXPIRES?|EXPIRY|IN|MODEL|ENABLED?|DISABLED?|USE|FLAG|DEBUG|VERBOSE)(?:_|$)/.test(name)) return false;
+  return secretEnvName(name) || (/_KEY$/.test(name) && !PUBLIC_PREFIX.test(name));
 }
 
 // ---------------------------------------------------------------- masking
@@ -543,11 +557,11 @@ export function bundleLeakFindings(found: Readonly<Record<string, string[]>>, pl
     if (!where.length) continue;
     const isPublic = PUBLIC_PREFIX.test(name);
     const keyVar = value.startsWith("sk-PLACEHOLDER-");
-    if (isPublic && !keyVar && !secretEnvName(name)) continue;
-    const critical = keyVar || secretEnvName(name);
+    // Config that isn't a secret (APP_VERSION inlined via next.config env) is not a leak.
+    if (!keyVar && !secretEnvName(name) && !canaryWorthy(name)) continue;
     out.push({
       id: `f-bundle-env-${out.length + 1}`,
-      severity: critical ? "critical" : "high",
+      severity: "critical",
       category: "secret_exposure",
       title: `${name} is built into the client bundle`,
       description:

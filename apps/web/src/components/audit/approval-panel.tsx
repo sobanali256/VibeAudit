@@ -181,7 +181,7 @@ export function ApprovalPanel({ auditId, request }: { auditId: string; request: 
 }
 
 const ENV_LABEL = {
-  canary: "gets a canary value (tracked if it leaks)",
+  canary: "gets a canary value (any leak during install is flagged)",
   placeholder: "test key slot",
   empty: "left empty",
 } as const;
