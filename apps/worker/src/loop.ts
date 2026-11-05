@@ -3,6 +3,7 @@ import { CHANNEL_QUEUE, type Sql, claimNextAudit, failStaleAudits } from "@vibea
 import { Sandbox, cliDocker } from "./sandbox";
 import { runAudit } from "./pipeline";
 import type { LlmClient } from "./llm";
+import type { OsvClient } from "./deps";
 
 export interface LoopConfig {
   sql: Sql;
@@ -11,6 +12,7 @@ export interface LoopConfig {
   githubToken?: string;
   /** LLM client for the static review stage (optional). */
   llm?: LlmClient;
+  osv?: OsvClient;
   /** Fallback poll even without a NOTIFY (also drives the stale-audit sweep). */
   pollMs?: number;
 }
@@ -42,7 +44,7 @@ export async function runLoop(cfg: LoopConfig): Promise<() => Promise<void>> {
         if (!audit) break;
         console.log(`[worker] running audit ${audit.id}`);
         const sandbox = new Sandbox(audit.id, cfg.proxyUrl, cliDocker(cfg.dockerHost));
-        await runAudit(audit, { sql, sandbox, proxyUrl: cfg.proxyUrl, token: cfg.githubToken, llm: cfg.llm });
+        await runAudit(audit, { sql, sandbox, proxyUrl: cfg.proxyUrl, token: cfg.githubToken, llm: cfg.llm, osv: cfg.osv });
         console.log(`[worker] finished audit ${audit.id}`);
       }
     } finally {

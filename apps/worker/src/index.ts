@@ -3,6 +3,7 @@ import { createDb, migrate } from "@vibeaudit/db";
 import { loadConfig } from "./config";
 import { runLoop } from "./loop";
 import { createLlm } from "./llm";
+import { createOsv } from "./deps";
 import { clearProxyState } from "./proxy-state";
 
 // Entry point for the audit worker (runs on VM 1). It consumes the job queue and drives the
@@ -29,6 +30,7 @@ async function main() {
     proxyUrl: config.SANDBOX_PROXY_URL,
     githubToken: config.GITHUB_TOKEN,
     llm,
+    osv: createOsv(),
   });
 
   const shutdown = async (sig: string) => {

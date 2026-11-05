@@ -24,6 +24,7 @@ import {
 } from "@vibeaudit/db";
 import { type Plan, planFromManifest } from "./planner";
 import { collectSources, llmReview } from "./review";
+import { type OsvClient, type PackageList, dependencyFindings, listPackages, mergePackageLists } from "./deps";
 import { EXAMPLE_FILE, type SecretHit, bundleLeakFindings, bundleRoots, collectBundleFiles, collectRepoFiles, maskFinding, maskSecrets, scanFiles, secretFindings } from "./secrets";
 import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
@@ -39,6 +40,8 @@ export interface PipelineDeps {
   appImage?: string;
   /** LLM client for the static review stage. Absent = skip the LLM review. */
   llm?: LlmClient;
+  /** Advisory database for the dependency audit. Absent = skip it. */
+  osv?: OsvClient;
   /** Poll interval while waiting for the human approval decision. */
   approvalPollMs?: number;
 }
@@ -135,6 +138,12 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // --- static: review the repo source (before install, so no node_modules noise). Always
     // runs, even for a static-only audit. Best effort: a review failure never fails the audit. ---
     await enter("static");
+    // Package list from the committed lockfile, taken before any repo code runs: install
+    // scripts could later rewrite the lockfiles to hide a malicious package.
+    const depsBefore = deps.osv ? await listPackages(sandbox, image, id, "deps-pre").catch(() => null) : null;
+    if (deps.osv) {
+      await ev(sql, id, "log", { stage: "static", msg: maskSecrets(`pre-install package list: ${depsBefore ? `${depsBefore.packages.length} from ${depsBefore.src}${depsBefore.why ? ` (${depsBefore.why})` : ""}` : "failed"}`) }).catch(() => {});
+    }
     let repoHits: SecretHit[] = [];
     let envScanned = false;
     try {
@@ -241,6 +250,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
 
     // --- report ---
     await enter("report");
+    // Dependency audit: what install put in node_modules (or the lockfile, if install never
+    // ran), checked against OSV from VM 1. Best effort, like the other static passes.
+    if (deps.osv) await auditDependencies(sandbox, image, id, sql, findings, deps.osv, depsBefore);
     const status = staticOnly ? "static_only" : "completed";
     containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
     const report: Report = {
@@ -594,10 +606,18 @@ function mkFinding(id: string, severity: Finding["severity"], category: Finding[
 }
 
 const WEIGHT: Record<Finding["severity"], number> = { critical: 40, high: 20, medium: 10, low: 4, info: 0 };
-function scoreFrom(findings: Finding[]): number {
+const DEP_PENALTY_CAP = 30;
+export function scoreFrom(findings: Finding[]): number {
   // Unconfirmed findings (static suspicion, e.g. LLM review) count at half weight, so a noisy
   // or hallucinating static pass can't tank an otherwise-clean repo the way proven findings do.
-  const penalty = findings.reduce((s, f) => s + WEIGHT[f.severity] * (f.confirmed ? 1 : 0.5), 0);
+  const cost = (f: Finding) => WEIGHT[f.severity] * (f.confirmed ? 1 : 0.5);
+  // Known-vulnerable dependency versions are capped as a group: most real apps carry a few
+  // advisories deep in their tree, and that hygiene signal shouldn't drown out what the audit
+  // proved about the app itself. Each one is still listed in full.
+  // (Known-malicious packages are supply_chain findings, outside the cap.)
+  const capped = (f: Finding) => f.source === "dep_audit" && f.category === "vulnerable_dependency";
+  const deps = Math.min(DEP_PENALTY_CAP, findings.filter(capped).reduce((s, f) => s + cost(f), 0));
+  const penalty = findings.filter((f) => !capped(f)).reduce((s, f) => s + cost(f), 0) + deps;
   return Math.max(0, Math.round(100 - penalty));
 }
 
@@ -660,5 +680,23 @@ async function scanBundle(sandbox: Sandbox, image: string, id: string, framework
     await ev(sql, id, "log", { stage: "build", msg: `bundle scan: ${out.length} finding(s) from ${got.files.length} candidate file(s)${got.partial ? " (partial: output budget reached)" : ""}` });
   } catch (e) {
     await ev(sql, id, "log", { stage: "build", msg: `bundle scan skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
+  }
+}
+
+async function auditDependencies(sandbox: Sandbox, image: string, id: string, sql: Sql, findings: Finding[], osv: OsvClient, before: PackageList | null): Promise<void> {
+  try {
+    const list = mergePackageLists(before, await listPackages(sandbox, image, id));
+    if (!list.packages.length) {
+      await ev(sql, id, "log", { stage: "report", msg: maskSecrets(`dependency audit: no package list (${list.src}${list.why ? `; ${list.why}` : ""})`) });
+      return;
+    }
+    const r = await dependencyFindings(list.packages, osv, list.src);
+    findings.push(...r.findings);
+    await ev(sql, id, "log", {
+      stage: "report",
+      msg: `dependency audit: ${r.vulnerable} flagged, ${r.checked} package(s) checked (${r.production} production; from ${list.src}${before?.packages.length ? " + pre-install lockfile" : ""}${list.truncated ? ", list truncated" : ""}${r.queryPartial ? ", OSV timed out part-way" : ""}${r.detailsSkipped ? ", some advisory details unavailable" : ""})`,
+    });
+  } catch (e) {
+    await ev(sql, id, "log", { stage: "report", msg: `dependency audit skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
   }
 }
