@@ -11,8 +11,10 @@ import {
   WORKSPACE_MOUNT,
   keyPlaceholder,
   MAX_ARCHIVE_ENTRIES,
+  AUDIT_TIMEOUT_MS,
   STAGE_TIMEOUTS_MS,
 } from "@vibeaudit/shared";
+import { AuditClock, AuditTimeout } from "./deadline";
 import {
   type AuditRow,
   addEvent,
@@ -51,13 +53,24 @@ export interface PipelineDeps {
   vision?: LlmClient;
   /** Poll interval while waiting for the human approval decision. */
   approvalPollMs?: number;
+  /** Whole-audit cap (tests shorten it). */
+  auditTimeoutMs?: number;
 }
 
 const APP_IMAGE = "node:22-bookworm-slim";
 const APPROVAL_TTL_MS = 30 * 60_000;
 
-const ev = (sql: Sql, id: string, kind: string, payload: Record<string, unknown> = {}) =>
-  addEvent(sql, id, kind, payload);
+/**
+ * Audits stopped by the whole-audit timeout. Their pipeline may still be unwinding in the
+ * background (an LLM or OSV call finishing): its progress events are dropped, so nothing shows
+ * up after the audit's final "error" event.
+ */
+const stoppedAudits = new Set<string>();
+
+const ev = async (sql: Sql, id: string, kind: string, payload: Record<string, unknown> = {}) => {
+  if (stoppedAudits.has(id)) return;
+  await addEvent(sql, id, kind, payload);
+};
 
 class Cancelled extends Error {}
 
@@ -85,16 +98,40 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
   // Browser pass: what the pages looked like (report) and the raw captures (for the verifier).
   let pages: PageVisit[] | undefined;
   let captures: PageCapture[] = [];
-  const enter = async (name: AuditStage) => {
-    marks.push({ stage: name, at: Date.now() });
-    await stage(sql, id, name);
-  };
   const limitHit = (st: AuditStage, detail: string) =>
     limitHits.push({ source: "limit", at: new Date().toISOString(), stage: st, limit: "stage_timeout", detail });
 
+  // Whole-audit cap. When it runs out: record it, kill the audit's containers (any in-flight
+  // `docker run` returns), and fail the audit with what it found so far. The pipeline below may
+  // keep unwinding in the background; clock.check() and the stopped sandbox keep it from
+  // starting anything new, and commit() keeps it from writing a report.
+  const timeoutMs = deps.auditTimeoutMs ?? AUDIT_TIMEOUT_MS;
+  const clock = new AuditClock(timeoutMs, () => {
+    stoppedAudits.add(id);
+    limitHits.push({
+      source: "limit",
+      at: new Date().toISOString(),
+      stage: marks.at(-1)?.stage ?? "intake",
+      limit: "audit_timeout",
+      detail: `the audit exceeded its ${Math.round(timeoutMs / 60_000)} min time limit; its containers were stopped`,
+    });
+    void sandbox.abort();
+  });
+  const enter = async (name: AuditStage) => {
+    clock.check();
+    marks.push({ stage: name, at: Date.now() });
+    await stage(sql, id, name);
+  };
+  // The proxy state is global (one active audit): a stopped audit must never re-arm it.
+  const setProxy = async (state: ProxyState) => {
+    clock.check();
+    await writeProxyState(state);
+    if (clock.expired) await clearProxyState().catch(() => {});
+  };
+
   const beat = setInterval(() => void heartbeat(sql, id).catch(() => {}), 20_000);
 
-  try {
+  const work = async (): Promise<void> => {
     if (audit.source.kind !== "github") throw new Error("only github sources are supported so far");
 
     // --- intake: resolve ref, stream the tarball into the sandbox (VM 1 never opens it) ---
@@ -133,9 +170,18 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     await enter("approve");
     const canaries = planCanaries(plan, id);
     const req = buildApprovalRequest(id, plan, manifest);
-    await requestApproval(sql, id, storable(req));
-    await ev(sql, id, "awaiting_approval", { requestId: req.requestId });
-    const decided = await waitForDecision(sql, id, deps.approvalPollMs ?? 2000, Date.parse(req.expiresAt));
+    // The human's think time has its own TTL; it doesn't count against the audit's cap.
+    clock.pause();
+    let decided: AuditRow;
+    try {
+      // The timer may have fired during enter()'s awaits, before the pause took effect.
+      clock.check();
+      await requestApproval(sql, id, storable(req));
+      await ev(sql, id, "awaiting_approval", { requestId: req.requestId });
+      decided = await waitForDecision(sql, id, deps.approvalPollMs ?? 2000, Date.parse(req.expiresAt));
+    } finally {
+      clock.start();
+    }
     if (decided.status === "cancelled") throw new Cancelled();
     const decision = decided.approval_decision!;
     if (decision.decision === "static_only") {
@@ -201,6 +247,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       try {
         const sources = await collectSources(sandbox, image, id);
         const llmFindings = await llmReview(sources, deps.llm);
+        clock.check();
         findings.push(...llmFindings);
         await ev(sql, id, "log", { stage: "static", msg: `LLM review: ${llmFindings.length} finding(s) from ${sources.length} file(s)` });
       } catch (e) {
@@ -213,7 +260,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     if (!staticOnly) {
       // --- install (read-only egress: registries, GET/HEAD only) ---
       await enter("install");
-      await writeProxyState({ auditId: id, stage: "install", keys: {}, canaries: Object.values(canaries) });
+      await setProxy({ auditId: id, stage: "install", keys: {}, canaries: Object.values(canaries) });
       const install = await sandbox.run({
         role: "app",
         image,
@@ -241,7 +288,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       // --- build (if any) ---
       if (!staticOnly && plan.buildCommand) {
         await enter("build");
-        await writeProxyState({ auditId: id, stage: "build", keys: {}, canaries: Object.values(canaries) });
+        await setProxy({ auditId: id, stage: "build", keys: {}, canaries: Object.values(canaries) });
         const build = await sandbox.run({
           role: "app",
           image,
@@ -259,7 +306,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       // --- run + dynamic probing ---
       if (!staticOnly && plan.startCommand) {
         await enter("run");
-        await writeProxyState({ auditId: id, stage: "run", keys: proxyKeys(testKeys), canaries: Object.values(canaries) });
+        await setProxy({ auditId: id, stage: "run", keys: proxyKeys(testKeys), canaries: Object.values(canaries) });
         const appName = await sandbox.start({
           role: "app",
           image,
@@ -287,7 +334,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           // run budget (browse() bounds its own container and never throws).
           const left = runDeadline - Date.now();
           if (left > 15_000) {
-            const got = await capturePages(sandbox, id, ip, plan.port ?? 3000, sql, Math.min(120_000, left));
+            const got = await capturePages(sandbox, id, ip, plan.port ?? 3000, sql, Math.min(120_000, left), () => clock.expired);
             pages = got.visits;
             captures = got.captures;
           }
@@ -303,6 +350,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       } else {
         await enter("verify");
         const { verdicts, failed } = await verifyPages(deps.vision, candidates);
+        clock.check();
         const shots = new Map(pages.flatMap((p) => (p.screenshot ? [[p.path, p.screenshot] as const] : [])));
         const found = visionFindings(verdicts, captures, shots);
         findings.push(...found);
@@ -322,6 +370,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // Dependency audit: what install put in node_modules (or the lockfile, if install never
     // ran), checked against OSV from VM 1. Best effort, like the other static passes.
     if (deps.osv) await auditDependencies(sandbox, image, id, sql, findings, deps.osv, depsBefore);
+    // A stopped audit must not start the firewall-log reader: it would clash with the catch
+    // path's own (fixed container name) and lose the timed-out report's evidence.
+    clock.check();
     const status = staticOnly ? "static_only" : "completed";
     containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
     const report: Report = {
@@ -338,16 +389,34 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       startedAt,
       finishedAt: new Date().toISOString(),
     };
+    // Point of no return: past here the timeout can't fire, and if it already did we must not
+    // write a "completed" report over the timed-out one.
+    if (!clock.commit()) throw new AuditTimeout(timeoutMs);
     // Final event first: live viewers hang up once the status turns terminal.
     await ev(sql, id, "done", { status, score: report.score, findings: findings.length });
     // The whole report (pages, containment, findings) through storable: one stray NUL or lone
     // surrogate from the app or the proxy must not make it unwritable.
     await finishAudit(sql, id, { status, report: storable(report) });
+  };
+
+  try {
+    clock.start();
+    await Promise.race([work(), clock.expiry]);
   } catch (err) {
     if (err instanceof Cancelled) {
       await ev(sql, id, "cancelled", {});
       return;
     }
+    const timedOut = err instanceof AuditTimeout;
+    // An ordinary failure near the deadline must not be overtaken by the timeout mid-report
+    // (its abort would kill the firewall-log reader and lose the containment evidence).
+    if (!timedOut) clock.stop();
+    // Make sure the containers are gone before reading the firewall log (the abort's second
+    // sweep would kill that reader too).
+    if (timedOut) await sandbox.abort();
+    // On a timeout the pipeline may still be unwinding and pushing to `findings`; report a
+    // snapshot so nothing lands twice or after the fact.
+    const found = timedOut ? [...findings] : findings;
     // Error text can carry sandbox stderr (e.g. "unpack failed: ..."): mask before storing it.
     const message = maskSecrets((err instanceof Error ? err.message : String(err)).slice(0, 4000));
     // Keep what the sandbox did even when the audit fails: a hostile install that exfils and
@@ -356,15 +425,15 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     try {
       // Assembled already if the failure came after the report was built (e.g. finishAudit):
       // reuse it, since assembling again would add its findings to `findings` a second time.
-      containment ??= await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
+      containment ??= await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, found);
       partial = {
         auditId: id,
         source: audit.source,
         status: "failed",
         mode: marks.some((m) => m.stage === "install") ? "runtime" : "static_only",
         staticOnlyReason: `the audit failed: ${message.slice(0, 300)}`,
-        score: scoreFrom(findings),
-        findings: findings.map(maskFinding).map(storable),
+        score: scoreFrom(found),
+        findings: found.map(maskFinding).map(storable),
         containment,
         pages,
         startedAt,
@@ -373,10 +442,14 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     } catch {
       // best effort; the failure itself is still recorded below
     }
-    await ev(sql, id, "error", { message: storable(message) }).catch(() => {});
+    // addEvent, not ev: a timed-out audit's progress events are muted, but its final one isn't.
+    await addEvent(sql, id, "error", { message: storable(message) }).catch(() => {});
     await finishAudit(sql, id, { status: "failed", error: storable(message), report: partial && storable(partial) }).catch(() => {});
   } finally {
+    clock.stop();
     clearInterval(beat);
+    // Long enough for a stopped pipeline to finish unwinding, then forget the id.
+    if (stoppedAudits.has(id)) setTimeout(() => stoppedAudits.delete(id), 15 * 60_000).unref();
     await clearProxyState().catch(() => {});
     await sandbox.teardown();
   }
@@ -444,6 +517,8 @@ async function waitForDecision(sql: Sql, id: string, pollMs: number, deadlineMs:
     const row = await getAudit(sql, id);
     if (!row) throw new Error("audit vanished while awaiting approval");
     if (row.status === "cancelled") return row;
+    // Failed or finished elsewhere (timeout, crash sweep): nothing left to wait for.
+    if (["failed", "completed", "static_only"].includes(row.status)) throw new Cancelled();
     if (row.status !== "awaiting_approval" && row.approval_decision) return row;
     // The single worker blocks here, so the queue's own expiry sweep can't run meanwhile —
     // enforce the deadline ourselves, release the slot, and let the audit be cancelled.
@@ -794,14 +869,15 @@ async function auditDependencies(sandbox: Sandbox, image: string, id: string, sq
  * Browser pass: visit the app logged out, keep screenshots of pages worth showing, store them
  * as artifacts and describe every visit for the report. Never throws.
  */
-async function capturePages(sandbox: Sandbox, id: string, ip: string, port: number, sql: Sql, timeoutMs: number): Promise<{ visits: PageVisit[]; captures: PageCapture[] }> {
+async function capturePages(sandbox: Sandbox, id: string, ip: string, port: number, sql: Sql, timeoutMs: number, stopped: () => boolean = () => false): Promise<{ visits: PageVisit[]; captures: PageCapture[] }> {
   const { pages: captured, why } = await browse(sandbox, id, ip, port, undefined, timeoutMs);
   const keep = new Set(worthKeeping(captured));
   const visits: PageVisit[] = [];
   let stored = 0;
   for (const [i, c] of captured.entries()) {
     let screenshot: string | undefined;
-    if (keep.has(c) && c.screenshot) {
+    // A stopped audit stores no more screenshots (its report would never reference them).
+    if (keep.has(c) && c.screenshot && !stopped()) {
       const name = `page-${i + 1}.jpg`;
       try {
         await putArtifact(sql, id, name, c.screenshot);

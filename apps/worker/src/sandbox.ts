@@ -88,6 +88,7 @@ export class Sandbox {
   /** Host bridge interface of the audit network (iptables logs drops by it). Set by setup(). */
   bridge: string | null = null;
   private tornDown = false;
+  private aborting: Promise<void> | undefined;
 
   constructor(
     readonly auditId: string,
@@ -101,6 +102,7 @@ export class Sandbox {
 
   /** Create the per-audit network and workspace subdir (owned by the in-container user). */
   async setup(): Promise<void> {
+    this.live();
     // NOT --internal: the container must still reach the VM 1 proxy (off-bridge). The
     // DOCKER-USER egress lock is the control — it allows only tcp to the proxy and drops
     // the rest. An internal network would block the proxy too and break all egress.
@@ -118,6 +120,7 @@ export class Sandbox {
     // Run as the workspace owner (1000). Root would need CAP_DAC_OVERRIDE, which we drop.
     const mk = await this.docker([
       "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
+      "--label", `${AUDIT_LABEL}=${this.auditId}`,
       "-v", `${WS_HOST_ROOT}:/ws`, "--user", "1000:1000", SETUP_IMAGE,
       "sh", "-c",
       `mkdir -p /ws/${this.auditId}/app /ws/${this.auditId}/home /ws/${this.auditId}/.cache`,
@@ -126,6 +129,7 @@ export class Sandbox {
   }
 
   async run(spec: RunSpec): Promise<ExecResult> {
+    this.live();
     const name = spec.name ?? `va-${this.auditId}-${spec.role}`;
     const args = [
       "run", "--rm", spec.input ? "-i" : "--init",
@@ -150,6 +154,7 @@ export class Sandbox {
 
   /** Start a long-running container (the app server) detached. Returns its name. */
   async start(spec: Omit<RunSpec, "input" | "timeoutMs">): Promise<string> {
+    this.live();
     const name = spec.name ?? `va-${this.auditId}-${spec.role}`;
     const args = [
       "run", "-d", "--init",
@@ -192,7 +197,33 @@ export class Sandbox {
     return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
   }
 
-  /** Remove everything this audit created. Safe to call more than once; never throws. */
+  /** Refuse to start repo-facing containers once the audit was stopped or torn down. */
+  private live(): void {
+    if (this.aborting || this.tornDown) throw new SandboxError("the audit was stopped");
+  }
+
+  /**
+   * Stop the audit's containers now (whole-audit timeout). Every later setup/run/start throws,
+   * and killing the containers makes any in-flight `docker run` return at once. Two sweeps,
+   * because a run already past live() may create its container just after the first `ps`.
+   * The network and workspace stay until teardown(). Idempotent; never throws.
+   */
+  abort(): Promise<void> {
+    this.aborting ??= (async () => {
+      for (const pause of [0, 2000]) {
+        if (pause) await new Promise((r) => setTimeout(r, pause));
+        try {
+          const ids = await this.docker(["ps", "-aq", "--filter", `label=${AUDIT_LABEL}=${this.auditId}`], { timeoutMs: 30_000 });
+          const list = ids.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+          if (list.length) await this.docker(["rm", "-f", ...list], { timeoutMs: 60_000 });
+        } catch {
+          // best effort: teardown and the VM 2 janitor are the backstops
+        }
+      }
+    })();
+    return this.aborting;
+  }
+
   /**
    * iptables drop lines for this audit's bridge from VM 2's kernel log. Read by a throwaway
    * container (ours, not repo code) with only that file mounted read-only, since the worker
@@ -215,12 +246,22 @@ export class Sandbox {
     if (this.tornDown) return;
     this.tornDown = true;
     try {
-      const ids = await this.docker(["ps", "-aq", "--filter", `label=${AUDIT_LABEL}=${this.auditId}`]);
+      // Bounded: a hung Docker call here would hold the single audit slot.
+      const ids = await this.docker(["ps", "-aq", "--filter", `label=${AUDIT_LABEL}=${this.auditId}`], { timeoutMs: 30_000 });
       const list = ids.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-      if (list.length) await this.docker(["rm", "-f", ...list]);
-      await this.docker(["network", "rm", this.network]);
+      if (list.length) await this.docker(["rm", "-f", ...list], { timeoutMs: 60_000 });
+      const net = await this.docker(["network", "rm", this.network], { timeoutMs: 30_000 });
+      // A container created after the `ps` (a slow run that was already starting when the
+      // audit was stopped) keeps the network busy: sweep once more and retry.
+      if (net.code !== 0 && /active endpoints|in use/i.test(net.stderr)) {
+        const late = await this.docker(["ps", "-aq", "--filter", `label=${AUDIT_LABEL}=${this.auditId}`], { timeoutMs: 30_000 });
+        const more = late.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+        if (more.length) await this.docker(["rm", "-f", ...more], { timeoutMs: 60_000 });
+        await this.docker(["network", "rm", this.network], { timeoutMs: 30_000 });
+      }
       await this.docker([
         "run", "--rm", "--runtime=runsc", "--network", "none", "--cap-drop", "ALL",
+        "--label", `${AUDIT_LABEL}=${this.auditId}`,
         "-v", `${WS_HOST_ROOT}:/ws`, "--user", "1000:1000", SETUP_IMAGE,
         "rm", "-rf", `/ws/${this.auditId}`,
       ], { timeoutMs: 30_000 });

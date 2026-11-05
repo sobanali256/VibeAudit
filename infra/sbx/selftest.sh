@@ -21,6 +21,7 @@ for img in $CURL $BB $PY; do docker image inspect "$img" >/dev/null 2>&1 || dock
 [ "$(docker info -f '{{.DefaultRuntime}}')" = runsc ] && pass "default runtime is runsc" || fail "default runtime is runsc" "$(docker info -f '{{.DefaultRuntime}}')"
 iptables -C DOCKER-USER -j VIBEAUDIT-EGRESS 2>/dev/null && iptables -C INPUT -j VIBEAUDIT-INPUT 2>/dev/null \
   && pass "egress/input chains hooked" || fail "egress/input chains hooked" "missing jump"
+systemctl is-active -q vibeaudit-sbx-janitor.timer && pass "janitor timer active" || fail "janitor timer active" "$(systemctl is-active vibeaudit-sbx-janitor.timer)"
 
 docker network create "$NET" >/dev/null
 GW=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NET")

@@ -114,7 +114,7 @@ export const ContainmentEntry = z.discriminatedUnion("source", [
     source: z.literal("limit"),
     at: z.string(),
     stage: AuditStage,
-    limit: z.enum(["pids", "memory", "cpu_time", "stage_timeout", "disk"]),
+    limit: z.enum(["pids", "memory", "cpu_time", "stage_timeout", "audit_timeout", "disk"]),
     detail: z.string(),
   }),
 ]);

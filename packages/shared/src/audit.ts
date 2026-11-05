@@ -59,8 +59,13 @@ export const MAX_ARCHIVE_ENTRIES = 50_000;
  * per-audit proxy contract first.
  */
 export const MAX_CONCURRENT_AUDITS = 1;
-/** The janitor force-removes any audit container or network older than this. */
+/**
+ * The VM 2 janitor (infra/sbx/janitor.sh, every 5 min) force-removes any audit container older
+ * than this. Networks and workspaces get JANITOR_IDLE_MAX_AGE_MS, since they legitimately live
+ * through the approval wait plus the audit. Keep both in sync with the script's defaults.
+ */
 export const JANITOR_MAX_AGE_MS = 30 * 60_000;
+export const JANITOR_IDLE_MAX_AGE_MS = 90 * 60_000;
 /** Intake back-pressure: new audits are refused while this many are queued or active. */
 export const MAX_OPEN_AUDITS = 10;
 /** A worker lease (heartbeat) older than this means the worker crashed; the audit is failed. */

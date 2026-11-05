@@ -71,6 +71,70 @@ describe("Sandbox", () => {
     expect(calls.some((c) => c.join(" ").includes("rm -rf /ws/aud1"))).toBe(true);
   });
 
+  it("abort() kills the audit's containers twice, once, and refuses new runs after", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = recorder({ stdout: "c1\n" });
+      const sb = new Sandbox("aud1", "http://p:8080", exec);
+      const a = sb.abort();
+      expect(sb.abort()).toBe(a); // idempotent: same promise
+      await vi.advanceTimersByTimeAsync(2000);
+      await a;
+      const ps = calls.filter((c) => c[0] === "ps");
+      expect(ps).toHaveLength(2);
+      expect(ps[0]).toEqual(expect.arrayContaining(["--filter", "label=vibeaudit.audit=aud1"]));
+      expect(calls.filter((c) => c[0] === "rm" && c.includes("c1"))).toHaveLength(2);
+      const before = calls.length;
+      await expect(sb.run({ role: "app", image: "img", cmd: ["x"], timeoutMs: 1000 })).rejects.toThrow(/stopped/);
+      await expect(sb.start({ role: "app", image: "img", cmd: ["x"] })).rejects.toThrow(/stopped/);
+      await expect(sb.setup()).rejects.toThrow(/stopped/);
+      expect(calls.length).toBe(before);
+      // teardown still cleans up after an abort
+      await sb.teardown();
+      expect(calls.some((c) => c[0] === "network" && c[1] === "rm")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abort() never throws when docker fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const exec: DockerExec = vi.fn(async () => {
+        throw new Error("docker down");
+      });
+      const sb = new Sandbox("aud1", "http://p:8080", exec);
+      const a = sb.abort();
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(a).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("teardown sweeps again when a late container keeps the network busy", async () => {
+    const calls: string[][] = [];
+    let netTries = 0;
+    let psCalls = 0;
+    const exec: DockerExec = vi.fn(async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "ps") return { code: 0, stdout: psCalls++ === 0 ? "" : "late1\n", stderr: "", timedOut: false };
+      if (args[0] === "network" && args[1] === "rm" && netTries++ === 0) return { code: 1, stdout: "", stderr: "error: network va-aud1 has active endpoints", timedOut: false };
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    });
+    await new Sandbox("aud1", "http://p:8080", exec).teardown();
+    expect(calls.find((c) => c[0] === "rm" && c.includes("late1"))).toEqual(["rm", "-f", "late1"]);
+    expect(calls.filter((c) => c[0] === "network" && c[1] === "rm")).toHaveLength(2);
+    expect(calls.some((c) => c.join(" ").includes("rm -rf /ws/aud1"))).toBe(true);
+  });
+
+  it("run() refuses after teardown", async () => {
+    const { exec } = recorder();
+    const sb = new Sandbox("aud1", "http://p:8080", exec);
+    await sb.teardown();
+    await expect(sb.run({ role: "app", image: "img", cmd: ["x"], timeoutMs: 1000 })).rejects.toThrow(/stopped/);
+  });
+
   it("teardown runs only once and never throws", async () => {
     const exec: DockerExec = vi.fn(async () => {
       throw new Error("docker down");

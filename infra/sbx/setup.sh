@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # VM 2 (sandbox host): Docker + gVisor + egress lock + host firewall. Safe to rerun.
 # Run as root:  ssh vibe-sbx 'bash -s' < infra/sbx/setup.sh
-# (firewall.sh must already be at /usr/local/sbin/vibeaudit-sbx-firewall; see install.sh)
+# (firewall.sh and janitor.sh must already be in /usr/local/sbin as vibeaudit-sbx-firewall and
+#  vibeaudit-sbx-janitor; see install.sh)
 set -euo pipefail
 
 CP_VPC_IP="${CP_VPC_IP:-10.1.96.4}"
@@ -111,6 +112,9 @@ ufw --force enable >/dev/null
 for img in node:22-bookworm-slim curlimages/curl:8.17.0 busybox:1.37 mcr.microsoft.com/playwright:v1.56.1-noble; do
   docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img" >/dev/null
 done
+
+# --- Janitor: removes audit containers/networks/workspaces a crashed worker left behind. ---
+/usr/local/sbin/vibeaudit-sbx-janitor --install
 
 docker info --format 'docker {{.ServerVersion}} default-runtime={{.DefaultRuntime}} cgroup={{.CgroupVersion}}'
 runsc --version | head -1
