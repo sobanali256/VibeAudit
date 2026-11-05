@@ -5,6 +5,7 @@ import {
   type ContainmentEntry,
   type Finding,
   KEY_PROVIDERS,
+  type PageVisit,
   type ProxyState,
   type Report,
   WORKSPACE_MOUNT,
@@ -19,6 +20,7 @@ import {
   getAudit,
   getSecrets,
   heartbeat,
+  putArtifact,
   requestApproval,
   type Sql,
 } from "@vibeaudit/db";
@@ -30,6 +32,7 @@ import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { clearProxyState, writeProxyState } from "./proxy-state";
+import { type PageCapture, browse, worthKeeping } from "./browse";
 import { type StageMark, egressFindings, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents } from "./containment";
 
 export interface PipelineDeps {
@@ -75,6 +78,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
   const marks: StageMark[] = [];
   const limitHits: ContainmentEntry[] = [];
   let containment: ContainmentEntry[] | undefined;
+  // Browser pass: what the pages looked like (report) and the raw captures (for the verifier).
+  let pages: PageVisit[] | undefined;
+  let captures: PageCapture[] = [];
   const enter = async (name: AuditStage) => {
     marks.push({ stage: name, at: Date.now() });
     await stage(sql, id, name);
@@ -244,6 +250,14 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
             probe(sandbox, id, ip, plan.port ?? 3000, findings, sql).catch(() => {}),
             new Promise((r) => setTimeout(r, Math.max(1000, runDeadline - Date.now()))),
           ]);
+          // Then the browser: logged-out visits with screenshots, inside what's left of the
+          // run budget (browse() bounds its own container and never throws).
+          const left = runDeadline - Date.now();
+          if (left > 15_000) {
+            const got = await capturePages(sandbox, id, ip, plan.port ?? 3000, sql, Math.min(120_000, left));
+            pages = got.visits;
+            captures = got.captures;
+          }
         }
       }
     }
@@ -265,6 +279,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       // Masked here, once, so no secret value from the repo or the app reaches the stored report.
       findings: findings.map(maskFinding),
       containment,
+      pages,
       startedAt,
       finishedAt: new Date().toISOString(),
     };
@@ -294,6 +309,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         score: scoreFrom(findings),
         findings: findings.map(maskFinding),
         containment,
+        pages,
         startedAt,
         finishedAt: new Date().toISOString(),
       };
@@ -699,4 +715,41 @@ async function auditDependencies(sandbox: Sandbox, image: string, id: string, sq
   } catch (e) {
     await ev(sql, id, "log", { stage: "report", msg: `dependency audit skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
   }
+}
+
+/**
+ * Browser pass: visit the app logged out, keep screenshots of pages worth showing, store them
+ * as artifacts and describe every visit for the report. Never throws.
+ */
+async function capturePages(sandbox: Sandbox, id: string, ip: string, port: number, sql: Sql, timeoutMs: number): Promise<{ visits: PageVisit[]; captures: PageCapture[] }> {
+  const { pages: captured, why } = await browse(sandbox, id, ip, port, undefined, timeoutMs);
+  const keep = new Set(worthKeeping(captured));
+  const visits: PageVisit[] = [];
+  let stored = 0;
+  for (const [i, c] of captured.entries()) {
+    let screenshot: string | undefined;
+    if (keep.has(c) && c.screenshot) {
+      const name = `page-${i + 1}.jpg`;
+      try {
+        await putArtifact(sql, id, name, c.screenshot);
+        screenshot = name;
+        stored++;
+      } catch {
+        // best effort: the visit is still reported, just without its picture
+      }
+    }
+    visits.push({
+      path: c.path,
+      status: c.status,
+      // Page-controlled text: mask any secret-looking value before it reaches the report.
+      finalPath: c.finalPath === undefined ? c.path : c.finalPath === null ? null : maskSecrets(c.finalPath),
+      title: maskSecrets(c.title),
+      screenshot,
+    });
+  }
+  const summary = captured.length
+    ? `browser: ${captured.length} page(s) visited, ${stored} screenshot(s) kept`
+    : `browser: no pages captured${why ? ` (${why})` : ""}`;
+  await ev(sql, id, "log", { stage: "dynamic", msg: summary }).catch(() => {});
+  return { visits, captures: captured };
 }

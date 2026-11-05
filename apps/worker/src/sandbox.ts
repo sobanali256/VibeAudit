@@ -22,16 +22,20 @@ const SETUP_IMAGE = "busybox:1.37";
 const WS_HOST_ROOT = "/srv/vibeaudit/ws"; // the size-capped fs created by infra/sbx/setup.sh
 const KERN_LOG = "/var/log/kern.log"; // rsyslog on VM 2; holds the VIBEAUDIT-DROP lines
 const MAX_OUTPUT = 256 * 1024; // per-exec stdout/stderr cap (logs are evidence, not bulk data)
+/** Hard ceiling for a run that asks for more (the browser pass returns screenshots). */
+const MAX_OUTPUT_CEILING = 8 * 1024 * 1024;
 
 export interface ExecResult {
   code: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** Output passed the cap and the CLI was killed (the container may still be running). */
+  truncated?: boolean;
 }
 
 /** A docker command runner. Default shells out to the real CLI; tests inject a fake. */
-export type DockerExec = (args: string[], opts?: { input?: Readable; timeoutMs?: number }) => Promise<ExecResult>;
+export type DockerExec = (args: string[], opts?: { input?: Readable; timeoutMs?: number; maxOutput?: number }) => Promise<ExecResult>;
 
 export function cliDocker(dockerHost: string): DockerExec {
   const base = ["-H", dockerHost];
@@ -40,7 +44,7 @@ export function cliDocker(dockerHost: string): DockerExec {
       const child = execFile(
         "docker",
         [...base, ...args],
-        { maxBuffer: MAX_OUTPUT, timeout: opts.timeoutMs ?? 0, killSignal: "SIGKILL" },
+        { maxBuffer: Math.min(opts.maxOutput ?? MAX_OUTPUT, MAX_OUTPUT_CEILING), timeout: opts.timeoutMs ?? 0, killSignal: "SIGKILL" },
         (err, stdout, stderr) => {
           const timedOut = !!(err && (err as NodeJS.ErrnoException & { killed?: boolean }).killed && opts.timeoutMs);
           if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return reject(err); // docker not installed
@@ -49,6 +53,7 @@ export function cliDocker(dockerHost: string): DockerExec {
             stdout: stdout.toString(),
             stderr: stderr.toString(),
             timedOut,
+            truncated: (err as NodeJS.ErrnoException | null)?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
           });
         },
       );
@@ -72,6 +77,8 @@ export interface RunSpec {
   name?: string;
   /** stream piped to the container's stdin (e.g. the repo tarball into `tar -x`). */
   input?: Readable;
+  /** stdout/stderr cap for this run (default 256 KB, ceiling 8 MB). */
+  maxOutput?: number;
   /** read-only stages (install/build) run GET/HEAD-only; this just tags the proxy stage. */
 }
 
@@ -134,7 +141,11 @@ export class Sandbox {
     ];
     for (const [k, v] of Object.entries(spec.env ?? {})) args.push(`--env=${k}=${v}`);
     args.push(spec.image, ...spec.cmd);
-    return this.docker(args, { input: spec.input, timeoutMs: spec.timeoutMs });
+    const r = await this.docker(args, { input: spec.input, timeoutMs: spec.timeoutMs, maxOutput: spec.maxOutput });
+    // Killing the CLI (timeout, output cap) doesn't stop the container: `--rm` only fires on
+    // exit. Remove it now so it can't keep burning CPU or block a reuse of its name.
+    if (r.timedOut || r.truncated) await this.docker(["rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
+    return r;
   }
 
   /** Start a long-running container (the app server) detached. Returns its name. */

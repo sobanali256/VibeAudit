@@ -1,4 +1,4 @@
-import type { ContainmentEntry, Evidence, Finding, Report, Severity } from "@vibeaudit/shared";
+import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, Severity } from "@vibeaudit/shared";
 import { LocalTime } from "@/components/local-time";
 
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
@@ -18,6 +18,12 @@ const CATEGORY: Record<Finding["category"], string> = {
   vulnerable_dependency: "Vulnerable dependency",
   supply_chain: "Supply chain",
 };
+
+/** Screenshot URL for an artifact name, or null if the name isn't one the worker writes. */
+function artifactUrl(auditId: string, name: string): string | null {
+  if (!/^[a-z0-9-]{1,40}\.jpg$/.test(name)) return null;
+  return `/api/audits/${encodeURIComponent(auditId)}/artifacts/${name}`;
+}
 
 /** The scorecard. Everything in it can contain repo- or sandbox-derived text: plain text only. */
 export function ReportView({ report }: { report: Report }) {
@@ -65,10 +71,12 @@ export function ReportView({ report }: { report: Report }) {
         <div className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Findings</h3>
           {findings.map((f) => (
-            <FindingCard key={f.id} f={f} />
+            <FindingCard key={f.id} f={f} auditId={report.auditId} />
           ))}
         </div>
       ) : null}
+
+      {report.pages?.length ? <Pages pages={report.pages} auditId={report.auditId} /> : null}
 
       <Containment entries={report.containment} />
 
@@ -107,7 +115,7 @@ function Score({ score }: { score: number }) {
   );
 }
 
-function FindingCard({ f }: { f: Finding }) {
+function FindingCard({ f, auditId }: { f: Finding; auditId: string }) {
   return (
     <article className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
       <header className="flex flex-wrap items-center gap-2">
@@ -124,7 +132,7 @@ function FindingCard({ f }: { f: Finding }) {
       <p className="text-sm leading-6 text-zinc-700 dark:text-zinc-300">{f.description}</p>
       <div className="flex flex-col gap-2">
         {f.evidence.map((e, i) => (
-          <EvidenceBlock key={i} e={e} />
+          <EvidenceBlock key={i} e={e} auditId={auditId} />
         ))}
       </div>
       {f.fix ? (
@@ -137,7 +145,7 @@ function FindingCard({ f }: { f: Finding }) {
   );
 }
 
-function EvidenceBlock({ e }: { e: Evidence }) {
+function EvidenceBlock({ e, auditId }: { e: Evidence; auditId: string }) {
   const box = "rounded-md bg-zinc-50 p-3 font-mono text-xs leading-5 dark:bg-zinc-900";
   switch (e.kind) {
     case "code":
@@ -177,13 +185,24 @@ function EvidenceBlock({ e }: { e: Evidence }) {
           {e.detail ? <div className="mt-1 text-zinc-600 dark:text-zinc-400">{e.detail}</div> : null}
         </div>
       );
-    case "screenshot":
+    case "screenshot": {
+      const src = artifactUrl(auditId, e.path);
       return (
         <div className={box}>
-          <span className="text-zinc-500">screenshot</span> {e.path}
-          {e.verdict ? <div className="mt-1 font-sans text-zinc-700 dark:text-zinc-300">{e.verdict}</div> : null}
+          {src ? (
+            <a href={src} target="_blank" rel="noopener noreferrer" className="block">
+              {/* eslint-disable-next-line @next/next/no-img-element -- evidence served by our API, not an optimizable asset */}
+              <img src={src} alt="Screenshot of the page, logged out" loading="lazy" className="w-full max-w-xl rounded border border-zinc-200 dark:border-zinc-800" />
+            </a>
+          ) : (
+            <span>
+              <span className="text-zinc-500">screenshot</span> {e.path}
+            </span>
+          )}
+          {e.verdict ? <div className="mt-2 font-sans text-zinc-700 dark:text-zinc-300">{e.verdict}</div> : null}
         </div>
       );
+    }
     default: {
       // Compile-time exhaustiveness; at runtime an unknown kind (a newer report) renders nothing.
       const unhandled: never = e;
@@ -191,6 +210,44 @@ function EvidenceBlock({ e }: { e: Evidence }) {
       return null;
     }
   }
+}
+
+/** What the browser saw, logged out: one card per page it visited. */
+function Pages({ pages, auditId }: { pages: PageVisit[]; auditId: string }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Pages visited (logged out)</h3>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {pages.map((p) => {
+          const src = p.screenshot ? artifactUrl(auditId, p.screenshot) : null;
+          // Same rule as the worker's stayed(): the query and a trailing slash don't count.
+          const landed = p.finalPath?.split("?")[0];
+          const moved = p.finalPath === null || (landed !== p.path && landed !== `${p.path}/`);
+          return (
+            <figure key={p.path} className="flex min-w-0 flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+              {src ? (
+                <a href={src} target="_blank" rel="noopener noreferrer">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- evidence served by our API */}
+                  <img src={src} alt={`Screenshot of ${p.path}`} loading="lazy" className="aspect-[8/5] w-full rounded border border-zinc-200 object-cover object-top dark:border-zinc-800" />
+                </a>
+              ) : null}
+              <figcaption className="flex min-w-0 flex-col gap-0.5 text-xs">
+                <div className="flex items-center gap-2 font-mono">
+                  <span className="truncate">{p.path}</span>
+                  <span className={p.status >= 200 && p.status < 300 ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-500"}>
+                    {p.status || "no response"}
+                  </span>
+                </div>
+                {moved ? <div className="truncate font-mono text-zinc-500">→ {p.finalPath ?? "left the app"}</div> : null}
+                {p.title ? <div className="truncate text-zinc-600 dark:text-zinc-400">{p.title}</div> : null}
+                {p.verdict ? <div className="text-zinc-700 dark:text-zinc-300">{p.verdict}</div> : null}
+              </figcaption>
+            </figure>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function Containment({ entries }: { entries: ContainmentEntry[] }) {

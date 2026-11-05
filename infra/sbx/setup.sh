@@ -106,6 +106,12 @@ if ufw status | grep -q "22/tcp on $PUB_IF .*ALLOW"; then
 fi
 ufw --force enable >/dev/null
 
+# --- Pre-pull the images audits run (pinned tags; keep in sync with the worker). The browser
+#     image is ~2 GB, so pulling it on demand would eat an audit's run budget.
+for img in node:22-bookworm-slim curlimages/curl:8.17.0 busybox:1.37 mcr.microsoft.com/playwright:v1.56.1-noble; do
+  docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img" >/dev/null
+done
+
 docker info --format 'docker {{.ServerVersion}} default-runtime={{.DefaultRuntime}} cgroup={{.CgroupVersion}}'
 runsc --version | head -1
 iptables -C DOCKER-USER -j VIBEAUDIT-EGRESS && iptables -C INPUT -j VIBEAUDIT-INPUT && echo "egress lock: present"

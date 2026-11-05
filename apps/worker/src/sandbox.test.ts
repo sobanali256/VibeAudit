@@ -52,6 +52,15 @@ describe("Sandbox", () => {
     expect(run).not.toContain("-i");
   });
 
+  it("run() removes the container when the CLI was killed (timeout or output cap), not otherwise", async () => {
+    for (const [result, removed] of [[{ timedOut: true, code: null }, true], [{ truncated: true, code: 1 }, true], [{ code: 1 }, false]] as const) {
+      const { exec, calls } = recorder(result);
+      const sb = new Sandbox("aud1", "http://p:8080", exec);
+      await sb.run({ role: "browser", image: "img", cmd: ["x"], timeoutMs: 1000, maxOutput: 6 * 1024 * 1024, name: "va-aud1-browser" });
+      expect(calls.some((c) => c[0] === "rm" && c.includes("va-aud1-browser"))).toBe(removed);
+    }
+  });
+
   it("teardown removes containers by label, the network and the workspace", async () => {
     const { exec, calls } = recorder({ stdout: "c1\nc2\n" });
     const sb = new Sandbox("aud1", "http://p:8080", exec);

@@ -58,6 +58,27 @@ export const MIGRATIONS: { id: number; name: string; sql: string }[] = [
       ALTER TABLE audits ADD COLUMN owner_hash text;
     `,
   },
+  {
+    id: 3,
+    name: "audit artifacts (screenshots)",
+    sql: /* sql */ `
+      -- Evidence files the worker captured (browser screenshots). The bytes come from the
+      -- sandbox: untrusted. The worker only stores JPEGs it has checked; the web serves them
+      -- as image/jpeg with nosniff and a locked-down CSP. Readable by anyone with the audit
+      -- link, like the report that references them.
+      CREATE TABLE audit_artifacts (
+        audit_id   text NOT NULL REFERENCES audits(id) ON DELETE CASCADE,
+        name       text NOT NULL,
+        mime       text NOT NULL,
+        data       bytea NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (audit_id, name),
+        CONSTRAINT audit_artifacts_name_chk CHECK (name ~ '^[a-z0-9-]{1,40}[.]jpg$'),
+        CONSTRAINT audit_artifacts_mime_chk CHECK (mime = 'image/jpeg'),
+        CONSTRAINT audit_artifacts_size_chk CHECK (octet_length(data) <= 1048576)
+      );
+    `,
+  },
 ];
 
 /** Role the internet-facing web app connects as (created by infra/cp/setup-app.sh). */
@@ -73,11 +94,12 @@ export const WEB_ROLE = "vibeaudit_web";
 const WEB_GRANTS = /* sql */ `
   DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${WEB_ROLE}') THEN
-      REVOKE ALL ON audits, audit_events, audit_secrets, schema_migrations FROM ${WEB_ROLE};
+      REVOKE ALL ON audits, audit_events, audit_secrets, audit_artifacts, schema_migrations FROM ${WEB_ROLE};
       GRANT SELECT, INSERT (id, source, owner_hash),
             UPDATE (status, approval_decision, finished_at, updated_at, heartbeat_at)
         ON audits TO ${WEB_ROLE};
       GRANT SELECT ON audit_events TO ${WEB_ROLE};
+      GRANT SELECT ON audit_artifacts TO ${WEB_ROLE};
       GRANT SELECT (audit_id), INSERT (audit_id, test_keys), DELETE ON audit_secrets TO ${WEB_ROLE};
     END IF;
   END $$;

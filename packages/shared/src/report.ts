@@ -24,6 +24,21 @@ export const LighthouseSection = z.object({
 });
 export type LighthouseSection = z.infer<typeof LighthouseSection>;
 
+/** One page the browser pass visited, logged out. Title/paths come from the app: untrusted. */
+export const PageVisit = z.object({
+  path: z.string(),
+  /** Main document HTTP status (0 = no response). */
+  status: z.number().int(),
+  /** Where the page ended up (a redirect to /login shows here); null if it left the app. */
+  finalPath: z.string().nullable(),
+  title: z.string(),
+  /** Artifact name of the screenshot, served at /api/audits/<id>/artifacts/<name>. */
+  screenshot: z.string().optional(),
+  /** What the vision model saw, when it ran. */
+  verdict: z.string().optional(),
+});
+export type PageVisit = z.infer<typeof PageVisit>;
+
 export const Report = z.object({
   auditId: z.string(),
   source: AuditSource,
@@ -35,6 +50,8 @@ export const Report = z.object({
   staticOnlyReason: z.string().optional(),
   findings: z.array(Finding),
   containment: z.array(ContainmentEntry),
+  /** Pages the browser pass visited (runtime audits only). */
+  pages: z.array(PageVisit).optional(),
   lighthouse: LighthouseSection.optional(),
   startedAt: z.string(),
   finishedAt: z.string(),

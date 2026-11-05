@@ -300,3 +300,25 @@ export async function failStaleAudits(sql: Sql, leaseMs: number, queuedMaxMs: nu
   }
   return ids;
 }
+
+// --- artifacts (evidence files: browser screenshots) -------------------------------------
+
+/** Artifact names the worker writes and the web serves: `<slug>.jpg`. Same rule as the DB check. */
+export const ARTIFACT_NAME_RE = /^[a-z0-9-]{1,40}\.jpg$/;
+export const MAX_ARTIFACT_BYTES = 1024 * 1024;
+
+/** Store (or replace) one JPEG for an audit. The caller has already checked the bytes. */
+export async function putArtifact(sql: Sql, auditId: string, name: string, data: Buffer): Promise<void> {
+  if (!AUDIT_ID_RE.test(auditId) || !ARTIFACT_NAME_RE.test(name)) throw new Error("invalid artifact name");
+  if (data.length === 0 || data.length > MAX_ARTIFACT_BYTES) throw new Error("artifact too large");
+  await sql`
+    INSERT INTO audit_artifacts (audit_id, name, mime, data) VALUES (${auditId}, ${name}, 'image/jpeg', ${data})
+    ON CONFLICT (audit_id, name) DO UPDATE SET data = EXCLUDED.data, created_at = now()`;
+}
+
+export async function getArtifact(sql: Sql, auditId: string, name: string): Promise<{ mime: string; data: Buffer } | null> {
+  if (!AUDIT_ID_RE.test(auditId) || !ARTIFACT_NAME_RE.test(name)) return null;
+  const [row] = await sql<{ mime: string; data: Buffer }[]>`
+    SELECT mime, data FROM audit_artifacts WHERE audit_id = ${auditId} AND name = ${name}`;
+  return row ?? null;
+}

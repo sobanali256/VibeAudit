@@ -11,7 +11,9 @@ import {
   failStaleAudits,
   finishAudit,
   countOpenAudits,
+  getArtifact,
   getAudit,
+  putArtifact,
   getAuditSummary,
   getReport,
   getSecrets,
@@ -63,7 +65,7 @@ d("audits (postgres)", { timeout: 60_000 }, () => {
     if (!dbrow || !/_test$/.test(dbrow.current_database)) throw new Error(`refusing to drop non-test db ${dbrow?.current_database}`);
     await sql`DROP SCHEMA public CASCADE`;
     await sql`CREATE SCHEMA public`;
-    expect(await migrate(sql)).toEqual([1, 2]);
+    expect(await migrate(sql)).toEqual([1, 2, 3]);
     expect(await migrate(sql)).toEqual([]); // idempotent
   });
   beforeEach(async () => {
@@ -256,5 +258,19 @@ d("audits (postgres)", { timeout: 60_000 }, () => {
     await requestApproval(sql, a.id, { ...req(a.id), expiresAt: new Date(Date.now() - 1000).toISOString() });
     expect(await decideApproval(sql, { decision: "static_only", auditId: a.id, requestId: "req-0000001" })).toBe(false);
     expect((await getAudit(sql, a.id))?.status).toBe("awaiting_approval");
+  });
+  it("stores and reads artifacts; rejects bad names, oversize and unknown audits", async () => {
+    const a = await createAudit(sql, src);
+    const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+    await putArtifact(sql, a.id, "page-1.jpg", jpg);
+    await putArtifact(sql, a.id, "page-1.jpg", jpg); // replace is fine
+    const got = await getArtifact(sql, a.id, "page-1.jpg");
+    expect(got?.mime).toBe("image/jpeg");
+    expect(Buffer.from(got!.data).equals(jpg)).toBe(true);
+    expect(await getArtifact(sql, a.id, "page-2.jpg")).toBeNull();
+    expect(await getArtifact(sql, a.id, "../x.jpg")).toBeNull();
+    await expect(putArtifact(sql, a.id, "x.svg", jpg)).rejects.toThrow();
+    await expect(putArtifact(sql, a.id, "big.jpg", Buffer.alloc(1024 * 1024 + 1))).rejects.toThrow();
+    await expect(putArtifact(sql, "zzzzzzzzzzzzzzzzzzzz", "page-1.jpg", jpg)).rejects.toThrow(); // FK
   });
 });
