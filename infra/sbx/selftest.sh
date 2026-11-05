@@ -84,5 +84,13 @@ d1=$(df --output=used -m / | tail -1)
 [ $((d1-d0)) -lt 200 ] && [ "$out" != wrote ] && pass "rootfs write bounded by memory cap (host disk +$((d1-d0))MB)" \
   || fail "rootfs write bounded" "host disk +$((d1-d0))MB, out=$out"
 
+# --- workspace can run native binaries (esbuild, SWC, sharp...) under runsc ----------
+# A noexec workspace makes every such binary die with SIGSEGV under gVisor.
+WS_T=/srv/vibeaudit/ws/selftest-$$
+install -d -o 1000 -g 1000 "$WS_T"
+out=$(docker run --rm --user 1000:1000 --cap-drop ALL -v "$WS_T:/w" $BB sh -c 'cp /bin/busybox /w/busybox && /w/busybox echo exec-ok' 2>&1)
+rm -rf "$WS_T"
+[ "$out" = exec-ok ] && pass "workspace runs native binaries (runsc)" || fail "workspace runs native binaries" "$out"
+
 echo "---"; [ $fails -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
 exit $fails

@@ -92,8 +92,14 @@ if [ ! -f "$WS_IMG" ]; then
   mkfs.ext4 -q -m 0 -O ^has_journal "$WS_IMG"   # no journal: it's scratch, destroyed per audit
 fi
 install -d -m 755 "$WS_MOUNT"
-grep -q "$WS_IMG" /etc/fstab || echo "$WS_IMG $WS_MOUNT ext4 loop,nosuid,nodev,noexec,noatime 0 0" >> /etc/fstab
+# NOT noexec: under runsc a native binary run from a noexec mount dies with SIGSEGV (esbuild,
+# Next's SWC, sharp, Prisma engines, lightningcss...), which broke the build of nearly every real
+# Next.js/Vite app. Repo JS already runs arbitrary code inside gVisor; a native binary runs in the
+# same sandbox with the same caps, and the host never executes anything from here. nosuid/nodev stay.
+grep -q "$WS_IMG" /etc/fstab || echo "$WS_IMG $WS_MOUNT ext4 loop,nosuid,nodev,noatime 0 0" >> /etc/fstab
+sed -i "\#^$WS_IMG #s/,noexec//" /etc/fstab   # older installs had noexec
 mountpoint -q "$WS_MOUNT" || mount "$WS_MOUNT"
+mount -o remount,exec "$WS_MOUNT"
 # The audit user owns the contents; the worker makes/removes per-audit subdirs via a container.
 chown 1000:1000 "$WS_MOUNT"; chmod 1770 "$WS_MOUNT"
 
