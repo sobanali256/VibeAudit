@@ -244,7 +244,8 @@ function exfilFinding(n: number, e: ProxyEntry): Finding {
   return {
     id: `f-exfil-${n}`,
     severity: "critical",
-    category: "secret_exposure",
+    // At install/build time it's install-time malware (score cap + banner); later it's the app.
+    category: e.stage === "install" || e.stage === "build" ? "supply_chain" : "secret_exposure",
     title: "Secret exfiltration attempt",
     description:
       `During the ${e.stage ?? "audit"} stage, code in the sandbox tried to send ${what} to ${e.host ?? "an external host"}. ` +

@@ -34,6 +34,7 @@ import { Sandbox, SandboxError } from "./sandbox";
 import { clearProxyState, writeProxyState } from "./proxy-state";
 import { type PageCapture, browse, worthKeeping } from "./browse";
 import { verdictLine, verifyPages, visionCandidates, visionFindings } from "./vision";
+import { ROOT_HOOKS, collectInstallScripts, depsUncheckedFinding, installScriptFindings, unrunHookSummary, unscannedRootFinding } from "./install-scripts";
 import { type StageMark, egressFindings, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents } from "./containment";
 
 export interface PipelineDeps {
@@ -132,7 +133,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     await enter("approve");
     const canaries = planCanaries(plan, id);
     const req = buildApprovalRequest(id, plan, manifest);
-    await requestApproval(sql, id, req);
+    await requestApproval(sql, id, storable(req));
     await ev(sql, id, "awaiting_approval", { requestId: req.requestId });
     const decided = await waitForDecision(sql, id, deps.approvalPollMs ?? 2000, Date.parse(req.expiresAt));
     if (decided.status === "cancelled") throw new Cancelled();
@@ -176,6 +177,26 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           (envScanned ? "no recognisable key was found in it, but check it by hand." : "the secret scan could not check it, so check it by hand."),
         true, [{ kind: "code", file: realEnv[0]!, snippet: "(environment file present in the repository root)" }], "secret_scan"));
     }
+    // The repo's own install hooks, read and judged whether or not this audit lets them run.
+    let installCount = 0;
+    {
+      const root = await collectInstallScripts(sandbox, image, id, "root");
+      const fs = installScriptFindings(root.pkgs, !ignoreScripts, 1);
+      // Fail closed: hooks declared in package.json that the scan couldn't (fully) read.
+      const declared = Object.fromEntries(
+        ROOT_HOOKS
+          .map((k) => [k, (manifest.packageJson.scripts as Record<string, unknown> | undefined)?.[k]] as const)
+          .filter((e): e is readonly [string, string] => typeof e[1] === "string" && e[1].trim() !== ""),
+      );
+      // (Partial reads of collected hooks are handled per package inside installScriptFindings.)
+      if (Object.keys(declared).length && !root.pkgs.length) {
+        fs.push(unscannedRootFinding(declared, `f-install-${fs.length + 1}`));
+      }
+      installCount = fs.length;
+      findings.push(...fs);
+      const hooks = root.pkgs[0] ? Object.keys(root.pkgs[0].hooks).join(", ") : "";
+      await ev(sql, id, "log", { stage: "static", msg: `install-script scan: ${hooks ? `root hooks ${hooks}` : "no root install hooks"}, ${fs.length} finding(s)${root.why ? ` (${root.why})` : ""}` }).catch(() => {});
+    }
     if (deps.llm) {
       try {
         const sources = await collectSources(sandbox, image, id);
@@ -202,6 +223,15 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         name: `va-${id}-install`,
       });
       await ev(sql, id, "log", { stage: "install", msg: tailLog(install) });
+      // Before the timeout check: a hook that hangs is exactly the one to read. Every installed dependency's install hooks, judged from their code. With ignore-scripts
+      // they never ran here, but they run for anyone who installs the project.
+      {
+        const dep = await collectInstallScripts(sandbox, image, id, "deps");
+        const fs = installScriptFindings(dep.pkgs, !ignoreScripts, installCount + 1);
+        if (dep.partial) fs.push(depsUncheckedFinding(`f-install-${installCount + fs.length + 1}`));
+        findings.push(...fs);
+        await ev(sql, id, "log", { stage: "install", msg: `dependency install-script scan: ${unrunHookSummary(dep.pkgs)}${ignoreScripts ? " (not run: ignore-scripts)" : ""}; ${fs.length} finding(s)${dep.partial ? " (partial)" : ""}` }).catch(() => {});
+      }
       if (install.timedOut) {
         limitHit("install", `install exceeded ${STAGE_TIMEOUTS_MS.install / 1000}s and was killed`);
         throw new Error("install timed out");
@@ -302,7 +332,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       staticOnlyReason: staticReason,
       score: scoreFrom(findings),
       // Masked here, once, so no secret value from the repo or the app reaches the stored report.
-      findings: findings.map(maskFinding),
+      findings: findings.map(maskFinding).map(storable),
       containment,
       pages,
       startedAt,
@@ -310,7 +340,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     };
     // Final event first: live viewers hang up once the status turns terminal.
     await ev(sql, id, "done", { status, score: report.score, findings: findings.length });
-    await finishAudit(sql, id, { status, report });
+    // The whole report (pages, containment, findings) through storable: one stray NUL or lone
+    // surrogate from the app or the proxy must not make it unwritable.
+    await finishAudit(sql, id, { status, report: storable(report) });
   } catch (err) {
     if (err instanceof Cancelled) {
       await ev(sql, id, "cancelled", {});
@@ -332,7 +364,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         mode: marks.some((m) => m.stage === "install") ? "runtime" : "static_only",
         staticOnlyReason: `the audit failed: ${message.slice(0, 300)}`,
         score: scoreFrom(findings),
-        findings: findings.map(maskFinding),
+        findings: findings.map(maskFinding).map(storable),
         containment,
         pages,
         startedAt,
@@ -341,8 +373,8 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     } catch {
       // best effort; the failure itself is still recorded below
     }
-    await ev(sql, id, "error", { message }).catch(() => {});
-    await finishAudit(sql, id, { status: "failed", error: message, report: partial }).catch(() => {});
+    await ev(sql, id, "error", { message: storable(message) }).catch(() => {});
+    await finishAudit(sql, id, { status: "failed", error: storable(message), report: partial && storable(partial) }).catch(() => {});
   } finally {
     clearInterval(beat);
     await clearProxyState().catch(() => {});
@@ -648,6 +680,18 @@ function mkFinding(id: string, severity: Finding["severity"], category: Finding[
 
 const WEIGHT: Record<Finding["severity"], number> = { critical: 40, high: 20, medium: 10, low: 4, info: 0 };
 const DEP_PENALTY_CAP = 30;
+/**
+ * Postgres jsonb rejects NUL and unpaired surrogates, and one such character from repo text
+ * (a snippet cut mid-emoji, or planted on purpose) would make the whole report unwritable.
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export function storable<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "string" ? x.replace(/\u0000/g, "").replace(LONE_SURROGATE, "�") : x))) as T;
+}
+
+/** Highest score a repo with critical supply-chain behaviour can get. */
+export const MALICIOUS_SCORE_CAP = 40;
+
 export function scoreFrom(findings: Finding[]): number {
   // Unconfirmed findings (static suspicion, e.g. LLM review) count at half weight, so a noisy
   // or hallucinating static pass can't tank an otherwise-clean repo the way proven findings do.
@@ -659,7 +703,11 @@ export function scoreFrom(findings: Finding[]): number {
   const capped = (f: Finding) => f.source === "dep_audit" && f.category === "vulnerable_dependency";
   const deps = Math.min(DEP_PENALTY_CAP, findings.filter(capped).reduce((s, f) => s + cost(f), 0));
   const penalty = findings.filter((f) => !capped(f)).reduce((s, f) => s + cost(f), 0) + deps;
-  return Math.max(0, Math.round(100 - penalty));
+  const score = Math.max(0, Math.round(100 - penalty));
+  // Malicious install-time behaviour caps the score whatever else is true: a repo whose install
+  // steals credentials is not a 60/100 app, and that holds even when the audit never ran it.
+  const malicious = findings.some((f) => f.category === "supply_chain" && f.severity === "critical");
+  return malicious ? Math.min(score, MALICIOUS_SCORE_CAP) : score;
 }
 
 function tailLog(r: { stdout: string; stderr: string }): string {

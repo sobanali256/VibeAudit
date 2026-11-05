@@ -30,6 +30,8 @@ export function ReportView({ report }: { report: Report }) {
   const findings = [...report.findings].sort(
     (a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) || Number(b.confirmed) - Number(a.confirmed),
   );
+  // Supply-chain findings that look hostile get a banner above everything else.
+  const hostile = findings.filter((f) => f.category === "supply_chain" && (f.severity === "critical" || f.severity === "high"));
   const counts = SEV_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length] as const).filter(([, n]) => n);
 
   return (
@@ -66,6 +68,22 @@ export function ReportView({ report }: { report: Report }) {
           </div>
         </div>
       </div>
+
+      {hostile.length ? (
+        <div role="alert" className="flex flex-col gap-2 rounded-xl border-2 border-red-600 bg-red-50 p-4 dark:bg-red-950/40">
+          <h3 className="font-semibold text-red-800 dark:text-red-300">Malicious install-time behaviour</h3>
+          <p className="text-sm text-red-900 dark:text-red-200">
+            This project, or a package it installs, does something hostile when it is installed. Don&apos;t run{" "}
+            <code className="font-mono">npm install</code> on it outside a sandbox
+            {hostile.some((f) => f.severity === "critical") ? ", and the score is capped at 40 whatever else the audit found" : ""}.
+          </p>
+          <ul className="list-disc pl-5 text-sm text-red-900 dark:text-red-200">
+            {hostile.map((f) => (
+              <li key={f.id}>{f.title}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {findings.length ? (
         <div className="flex flex-col gap-3">

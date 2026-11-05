@@ -73,7 +73,8 @@ describe("readProxyEvents", () => {
 
     expect(r.entries.filter((e) => e.source === "proxy" && e.verdict === "exfil")).toHaveLength(2);
     expect(r.findings).toHaveLength(1); // deduped per var+host
-    expect(r.findings[0]).toMatchObject({ severity: "critical", confirmed: true, source: "proxy" });
+    // At install time an exfil is install-time malware: supply_chain (score cap + banner).
+    expect(r.findings[0]).toMatchObject({ severity: "critical", confirmed: true, source: "proxy", category: "supply_chain" });
     expect(r.findings[0]!.description).toContain("DATABASE_URL");
     expect(r.findings[0]!.evidence[0]).toMatchObject({ kind: "http", url: "collect.example:8443/c" });
   });
@@ -146,6 +147,8 @@ describe("readProxyEvents bounds", () => {
     expect(blocked.length).toBe(301);
     expect(blocked.at(-1)).toMatchObject({ repeat: 200, stage: "install" });
     expect(r.entries.filter((e) => e.source === "proxy" && e.verdict === "exfil").length).toBe(50);
+    // At run time it's the app leaking a secret, not install-time malware.
+    expect(r.findings.every((f) => f.category === "secret_exposure")).toBe(true);
   });
 
   it("counts sampled repeats as deltas, so a later stage doesn't inherit an earlier one's total", async () => {
