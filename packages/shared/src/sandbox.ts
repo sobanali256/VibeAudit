@@ -200,6 +200,10 @@ export function containerArgs(i: ContainerArgsInput): string[] {
       `--env=NODE_EXTRA_CA_CERTS=${PROXY_CA_PATH_CONTAINER}`,
       `--env=npm_config_cafile=${PROXY_CA_PATH_CONTAINER}`,
       `--env=SSL_CERT_FILE=${PROXY_CA_PATH_CONTAINER}`,
+      // Yarn Berry ignores HTTP(S)_PROXY. (No YARN_HTTPS_CA_FILE_PATH: Yarn 2/3 reject it as an
+      // unknown setting, and Berry trusts NODE_EXTRA_CA_CERTS already.)
+      `--env=YARN_HTTP_PROXY=${i.proxyUrl}`,
+      `--env=YARN_HTTPS_PROXY=${i.proxyUrl}`,
     );
   }
   if (i.name) args.push(`--name=${i.name}`);

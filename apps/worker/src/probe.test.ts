@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Finding } from "@vibeaudit/shared";
 import { _probeForTest as probe } from "./pipeline";
+import { isReservedEnv } from "./pipeline";
 import type { Sandbox, ExecResult, RunSpec } from "./sandbox";
 
 // A curl stdout line as our probe expects it: response headers, a blank line, the body, then
@@ -100,5 +101,16 @@ describe("probe", () => {
     // users errored, but debug still surfaced.
     expect(findings.map((f) => f.id)).toContain("f-debug");
     expect(findings.find((f) => f.id === "f-users")).toBeUndefined();
+  });
+});
+
+describe("isReservedEnv", () => {
+  it("reserves the names the sandbox sets itself", () => {
+    for (const n of ["HTTPS_PROXY", "http_proxy", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "YARN_HTTPS_PROXY", "npm_config_cafile", "SSL_CERT_FILE", "PORT", "DO_NOT_TRACK", "NEXT_TELEMETRY_DISABLED", "PNPM_STORE_DIR"]) {
+      expect(isReservedEnv(n), n).toBe(true);
+    }
+  });
+  it("leaves ordinary app secrets alone", () => {
+    for (const n of ["OPENAI_API_KEY", "DATABASE_URL", "STRIPE_SECRET_KEY", "PROXY_SECRET", "constructor", "toString"]) expect(isReservedEnv(n), n).toBe(false);
   });
 });

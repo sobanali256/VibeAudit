@@ -16,6 +16,7 @@ const CATEGORY: Record<Finding["category"], string> = {
   unsafe_defaults: "Unsafe defaults",
   fragile_setup: "Fragile setup",
   vulnerable_dependency: "Vulnerable dependency",
+  supply_chain: "Supply chain",
 };
 
 /** The scorecard. Everything in it can contain repo- or sandbox-derived text: plain text only. */
@@ -165,6 +166,17 @@ function EvidenceBlock({ e }: { e: Evidence }) {
           <span className="text-zinc-500">client bundle</span> {e.asset}: <span className="break-all">{e.match}</span>
         </div>
       );
+    case "network":
+      return (
+        <div className={box}>
+          <div className="mb-1 text-zinc-500">
+            {e.control === "firewall" ? "firewall drop" : "proxy blocked"}
+            {e.stage ? ` · ${e.stage}` : ""} · <LocalTime iso={e.at} />
+          </div>
+          <span className="break-all">{e.target}</span>
+          {e.detail ? <div className="mt-1 text-zinc-600 dark:text-zinc-400">{e.detail}</div> : null}
+        </div>
+      );
     case "screenshot":
       return (
         <div className={box}>
@@ -172,6 +184,12 @@ function EvidenceBlock({ e }: { e: Evidence }) {
           {e.verdict ? <div className="mt-1 font-sans text-zinc-700 dark:text-zinc-300">{e.verdict}</div> : null}
         </div>
       );
+    default: {
+      // Compile-time exhaustiveness; at runtime an unknown kind (a newer report) renders nothing.
+      const unhandled: never = e;
+      void unhandled;
+      return null;
+    }
   }
 }
 

@@ -25,6 +25,8 @@ const KEEP_PER_VERDICT = 300;
 /** Exfil findings per audit, and hosts named in each (the sandbox chooses the hosts). */
 const MAX_EXFIL_FINDINGS = 10;
 const MAX_HOSTS_PER_FINDING = 5;
+/** Evasive blocked events kept past the per-verdict cap (see isEvasiveBlock). */
+const MAX_EVASIVE_EXTRA = 50;
 /** Rotate the proxy log at audit start past this size (the proxy reopens it on every write). */
 const ROTATE_BYTES = 64 << 20;
 
@@ -100,13 +102,14 @@ export async function readProxyEvents(opts: {
 
   const allowed = new Map<string, { e: ProxyEntry; n: number; keys: Set<string> }>();
   const kept: Record<"blocked" | "exfil", ProxyEntry[]> = { blocked: [], exfil: [] };
-  const dropped: Record<"blocked" | "exfil", number> = { blocked: 0, exfil: 0 };
+  // Overflow past the per-verdict cap, counted per stage so egressFindings still sees it.
+  const dropped = new Map<string, { verdict: "blocked" | "exfil"; stage: AuditStage | null; n: number; at: string }>();
+  let evasiveExtra = 0;
   // The proxy counts repeats per (kind, host, reason, method) across stages; its sampled
   // lines carry that running total. Track what we've accounted so each line adds its delta.
   const accounted = new Map<string, number>();
   const exfil = new Map<string, { f: Finding; hosts: Set<string>; extra: number }>();
   let lines = 0;
-  let lastAt = "";
 
   const rl = createInterface({ input: createReadStream(path, { start, encoding: "utf8" }), crlfDelay: Infinity });
   try {
@@ -136,7 +139,6 @@ export async function readProxyEvents(opts: {
       const stage = stageAt(opts.marks, ms) ?? (tagged.success ? tagged.data : null);
       const host = cap(ev.host, 253);
       const at = new Date(ms).toISOString();
-      if (at > lastAt) lastAt = at;
       const entry: ProxyEntry = {
         source: "proxy",
         at,
@@ -171,9 +173,30 @@ export async function readProxyEvents(opts: {
         continue;
       }
 
+      // A sampled line stands for every identical event since the last one we saw (the proxy's
+      // repeat is a running total per key): count the delta, not the total.
+      let n = 1;
+      if (ev.auditId !== null) {
+        const pk = `${ev.kind}|${ev.host}|${ev.reason}|${ev.method}`;
+        const before = accounted.get(pk) ?? 0;
+        const total = ev.repeat ? Math.max(ev.repeat, before + 1) : before + 1;
+        accounted.set(pk, total);
+        n = total - before;
+      }
+      const counted = n > 1 ? { ...entry, repeat: n } : entry;
       const bucket = kept[ev.kind];
-      if (bucket.length < KEEP_PER_VERDICT) bucket.push(ev.repeat && ev.auditId !== null ? { ...entry, repeat: ev.repeat } : entry);
-      else dropped[ev.kind]++;
+      if (bucket.length < KEEP_PER_VERDICT) bucket.push(counted);
+      // A flood of plain blocks must not push out the one request that shows intent.
+      else if (ev.kind === "blocked" && evasiveExtra < MAX_EVASIVE_EXTRA && isEvasiveBlock(entry)) {
+        evasiveExtra++;
+        bucket.push(counted);
+      } else {
+        const dk = `${ev.kind}|${stage}`;
+        const cur = dropped.get(dk) ?? { verdict: ev.kind, stage, n: 0, at };
+        cur.n += n;
+        if (at > cur.at) cur.at = at;
+        dropped.set(dk, cur);
+      }
 
       if (ev.kind === "exfil") {
         const what = entry.keyVar ?? "canary";
@@ -193,18 +216,15 @@ export async function readProxyEvents(opts: {
   }
 
   const entries: ContainmentEntry[] = [...kept.blocked, ...kept.exfil];
-  for (const verdict of ["blocked", "exfil"] as const) {
-    const n = dropped[verdict];
-    if (n > 0) {
-      entries.push({
-        source: "proxy",
-        at: lastAt || new Date(opts.windowEndMs).toISOString(),
-        stage: null,
-        verdict,
-        reason: `${n} more ${verdict} event(s) not listed`,
-        repeat: n,
-      });
-    }
+  for (const { verdict, stage, n, at } of dropped.values()) {
+    entries.push({
+      source: "proxy",
+      at, // the last overflowed event in that stage
+      stage,
+      verdict,
+      reason: `${n} more ${verdict} event(s) not listed`,
+      repeat: n,
+    });
   }
   for (const { e, n, keys } of allowed.values()) {
     entries.push({ ...e, ...(n > 1 ? { repeat: n } : {}), ...(keys.size ? { keyVar: [...keys].join(",") } : {}) });
@@ -289,3 +309,147 @@ export function mergeContainment(...parts: ContainmentEntry[][]): ContainmentEnt
   }
   return all.sort((a, b) => a.at.localeCompare(b.at));
 }
+
+/** Stages where the code running is the repo's install/build scripts and its dependencies'. */
+const SUPPLY_CHAIN_STAGES = new Set<AuditStage>(["install", "build"]);
+const MAX_EGRESS_EVIDENCE = 5;
+/** Proxy reasons that mean "a host we don't expect", which legitimate binary downloaders also hit. */
+const PLAIN_HOST_BLOCK = /^host not allowed in stage /;
+/** The "N more blocked event(s) not listed" overflow row readProxyEvents adds. */
+const OVERFLOW_ROW = /^\d+ more (?:blocked|exfil) event\(s\) not listed$/;
+/** More blocked install/build requests than this is itself a sign of intent (scanning, beaconing). */
+const BLOCK_FLOOD = 300;
+/** DNS drops past this look like data smuggled out in queries rather than one confused client. */
+const DNS_FLOOD = 20;
+/**
+ * Telemetry hosts well-known tools phone home to on their own (the sandbox env opts out, but
+ * not every version honours it). Plain requests to these are reported at info level; anything
+ * evasive is still not excused.
+ */
+const KNOWN_TOOL_HOSTS = new Set(["telemetry.nextjs.org", "telemetry.vercel.com", "checkpoint.prisma.io"]);
+/** The package registries are allowed in install but not build, where tools still poke them (lockfile patching, update checks). */
+const REGISTRY_HOSTS = new Set(["registry.npmjs.org", "registry.yarnpkg.com"]);
+/** Binary CDNs (storage.googleapis.com and the like) are deliberately absent: anyone can host a payload there. */
+const isKnownToolBlock = (e: ProxyEntry) => {
+  const h = stripPort(e.host ?? "");
+  return KNOWN_TOOL_HOSTS.has(h) || (e.stage === "build" && REGISTRY_HOSTS.has(h));
+};
+
+/** A block that isn't just "a GET to a host off the allowlist": raw socket, IP literal, odd port, a body, an upgrade... */
+export function isEvasiveBlock(e: { reason?: string; method?: string }): boolean {
+  if (!PLAIN_HOST_BLOCK.test(e.reason ?? "")) return true;
+  return !(e.method === undefined || e.method === "GET" || e.method === "HEAD" || e.method === "CONNECT");
+}
+
+type FirewallEntry = Extract<ContainmentEntry, { source: "firewall" }>;
+
+/**
+ * Turn egress that the sandbox stopped during install/build into findings. The containment log
+ * proves the attempt was contained; these say the repo (or a dependency of it) attempted it,
+ * which is a supply-chain red flag in its own right. Allowed traffic never counts, and nothing
+ * from run/dynamic does (an app calling an API we didn't key is not hostile).
+ *  - Firewall drops: the connection skipped the HTTP(S)_PROXY the sandbox is told to use.
+ *    Critical for anything but DNS: package managers and binary downloaders honour the proxy,
+ *    so a direct socket is deliberate. DNS-only drops are a client that ignores the proxy and
+ *    resolves names itself: medium.
+ *  - Proxy blocks: high when the request was evasive or carried data (raw TCP/UDP, IP literal,
+ *    odd port, non-GET, bodies); medium when it was only a GET to a host off the allowlist.
+ * Exfil attempts already have their own critical findings and aren't repeated here.
+ * Known limit: a dependency that only phones home once the app is running (run/dynamic) is not
+ * caught here, since app traffic to unkeyed APIs looks the same; it still shows in the log.
+ */
+export function egressFindings(entries: readonly ContainmentEntry[]): Finding[] {
+  const fw: FirewallEntry[] = [];
+  const px: ProxyEntry[] = [];
+  const pxStages: ProxyEntry[] = [];
+  let overflow = 0;
+  // Firewall times come from VM 2's clock and stage marks from VM 1's. Both are NTP-synced
+  // (ms skew), and the run container's first packet comes >1s after the run mark (docker start
+  // over SSH + node boot), so a run-stage connection isn't mistaken for a build one. No grace
+  // window on purpose: it would hide a postinstall that connects out just before install ends.
+  for (const e of entries) {
+    if (!e.stage || !SUPPLY_CHAIN_STAGES.has(e.stage)) continue;
+    if (e.source === "firewall") fw.push(e);
+    else if (e.source === "proxy" && e.verdict === "blocked" && !/^no active audit/.test(e.reason ?? "")) {
+      pxStages.push(e);
+      if (!e.host && !e.method && OVERFLOW_ROW.test(e.reason ?? "")) overflow += e.repeat ?? 0;
+      else px.push(e);
+    }
+  }
+  const out: Finding[] = [];
+
+  if (fw.length) {
+    const isDns = (e: FirewallEntry) => e.dport === 53;
+    const direct = fw.filter((e) => !isDns(e));
+    const shown = (direct.length ? direct : fw).slice(0, MAX_EGRESS_EVIDENCE);
+    const dests = distinct(fw.map(fwTarget));
+    const dnsFlood = !direct.length && fw.length > DNS_FLOOD;
+    out.push({
+      id: "f-egress-direct",
+      severity: direct.length ? "critical" : dnsFlood ? "high" : "medium",
+      category: "supply_chain",
+      title: direct.length ? "Install-time code opened a direct network connection" : "Install-time code resolved hosts outside the proxy",
+      description:
+        `During ${stagesOf(fw)}, code from the repo or one of its dependencies tried to reach ${listOf(dests)} without going through the ` +
+        "egress proxy it was given. The sandbox firewall dropped it, so nothing left; on a developer laptop or a CI runner it would have. " +
+        (direct.length
+          ? "Package managers and legitimate download scripts honour the proxy, so a raw connection like this is deliberate: treat the repo as hostile until you know what made it."
+          : dnsFlood
+            ? `Only DNS lookups were seen, but ${fw.length} of them: a confused download script makes a few, data smuggled out in DNS queries makes many.`
+            : "Only DNS lookups were seen, which is usually a download script that ignores proxy settings, but it can also be data smuggled out in DNS queries."),
+      confirmed: true,
+      evidence: shown.map((e) => ({ kind: "network" as const, control: "firewall" as const, at: e.at, stage: e.stage, target: fwTarget(e), detail: `direction ${e.direction}` })),
+      fix: "Check package.json scripts (preinstall/install/postinstall/prepare, build) and each dependency's install scripts for network calls; remove the code or the dependency. Install with --ignore-scripts until you have.",
+      source: "proxy",
+    });
+  }
+
+  if (pxStages.length) {
+    const evasive = px.filter(isEvasiveBlock);
+    const total = px.reduce((n, e) => n + (e.repeat ?? 1), 0) + overflow;
+    const flood = total > BLOCK_FLOOD;
+    const known = !evasive.length && !flood && !overflow && px.every(isKnownToolBlock);
+    const shown = [...evasive, ...px.filter((e) => !isEvasiveBlock(e))].slice(0, MAX_EGRESS_EVIDENCE);
+    const hosts = distinct(px.map((e) => e.host ?? "(unknown host)"));
+    out.push({
+      id: "f-egress-blocked",
+      severity: evasive.length || flood ? "high" : known ? "info" : "medium",
+      category: "supply_chain",
+      title: evasive.length
+        ? "Install-time code made a request the proxy refused"
+        : flood
+          ? "Install-time code flooded the proxy with blocked requests"
+          : known
+            ? "A build tool tried to phone home"
+            : "Install-time code contacted an unexpected host",
+      description:
+        `During ${stagesOf(pxStages)}, code from the repo or one of its dependencies sent ${total} request(s) the egress proxy blocked` +
+        (hosts.length ? `, to ${listOf(hosts)}${overflow ? " and others not listed" : ""}. ` : ". ") +
+        (evasive.length
+          ? "Some were not plain downloads (a raw socket, an IP address, an odd port, or a request carrying data), which install scripts have no reason to send."
+          : flood
+            ? "Install scripts fetch a handful of things; this many blocked requests looks like scanning or beaconing."
+            : known
+              ? "These hosts belong to well-known tools (telemetry or prebuilt-binary downloads), so this is almost certainly benign, but it is still traffic your install sends out."
+              : "They were plain downloads from hosts outside the package-registry allowlist. Some packages fetch prebuilt binaries this way, so check which one did before assuming the worst."),
+      confirmed: true,
+      evidence: (shown.length ? shown : pxStages.slice(0, 1)).map((e) => ({
+        kind: "network" as const,
+        control: "proxy" as const,
+        at: e.at,
+        stage: e.stage,
+        target: `${e.method ?? ""} ${e.host ?? ""}${e.path ?? ""}`.trim() || "(unknown)",
+        detail: [e.reason, e.repeat ? `×${e.repeat}` : null].filter(Boolean).join(" · ") || undefined,
+      })),
+      fix: "Find which install/build script or dependency makes these requests (npm explain, or the package's own scripts) and remove it or pin a version that doesn't.",
+      source: "proxy",
+    });
+  }
+  return out;
+}
+
+const fwTarget = (e: FirewallEntry) => `${e.proto} ${e.dst}${e.dport ? `:${e.dport}` : ""}`;
+const distinct = (xs: string[]) => [...new Set(xs)];
+const stripPort = (h: string) => h.replace(/:\d+$/, "").toLowerCase();
+const listOf = (xs: string[]) => (xs.length <= MAX_HOSTS_PER_FINDING ? xs.join(", ") : `${xs.slice(0, MAX_HOSTS_PER_FINDING).join(", ")} and ${xs.length - MAX_HOSTS_PER_FINDING} more`);
+const stagesOf = (es: readonly { stage: AuditStage | null }[]) => distinct(es.map((e) => e.stage!)).join(" and ");

@@ -10,6 +10,8 @@ export const FindingCategory = z.enum([
   "unsafe_defaults",
   "fragile_setup",
   "vulnerable_dependency",
+  /** Repo or dependency code doing something hostile at install/build time. */
+  "supply_chain",
 ]);
 export type FindingCategory = z.infer<typeof FindingCategory>;
 
@@ -40,6 +42,16 @@ export const Evidence = z.discriminatedUnion("kind", [
     asset: z.string(),
     /** The canary string or secret pattern found in the client bundle. */
     match: z.string(),
+  }),
+  z.object({
+    /** A connection the sandbox's egress controls stopped (from the containment log). */
+    kind: z.literal("network"),
+    control: z.enum(["proxy", "firewall"]),
+    at: z.string(),
+    stage: z.string().nullable(),
+    /** e.g. "tcp 192.0.2.1:443" or "GET evil.example/x". */
+    target: z.string(),
+    detail: z.string().optional(),
   }),
 ]);
 export type Evidence = z.infer<typeof Evidence>;

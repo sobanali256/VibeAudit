@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ContainmentEntry, Finding } from "@vibeaudit/shared";
-import { mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents, stageAt, type StageMark } from "./containment";
+import { egressFindings, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents, stageAt, type StageMark } from "./containment";
 
 const T0 = Date.parse("2026-11-04T12:00:00Z");
 const marks: StageMark[] = [
@@ -132,7 +132,7 @@ describe("readProxyEvents bounds", () => {
     const path = join(dir, "flood.jsonl");
     const flood: string[] = [];
     for (let i = 0; i < 2000; i++) {
-      flood.push(line({ ts: ts(T0 + 11_000), auditId: "me", stage: "install", kind: "blocked", method: "GET", host: `h${i}.example`, reason: "host not allowed" }));
+      flood.push(line({ ts: ts(T0 + 11_000), auditId: "me", stage: "install", kind: "blocked", method: "GET", host: `h${i}.example`, reason: "host not allowed in stage install" }));
     }
     for (let i = 0; i < 50; i++) {
       flood.push(line({ ts: ts(T0 + 21_000), auditId: "me", stage: "run", kind: "exfil", method: "POST", host: `x${i}.example`, reason: "canary", var: "SECRET" }));
@@ -144,7 +144,7 @@ describe("readProxyEvents bounds", () => {
     const blocked = r.entries.filter((e) => e.source === "proxy" && e.verdict === "blocked");
     // 300 kept individually + one "N more" summary; past the 500-line budget only exfil parsed
     expect(blocked.length).toBe(301);
-    expect(blocked.at(-1)).toMatchObject({ repeat: 200, stage: null });
+    expect(blocked.at(-1)).toMatchObject({ repeat: 200, stage: "install" });
     expect(r.entries.filter((e) => e.source === "proxy" && e.verdict === "exfil").length).toBe(50);
   });
 
@@ -173,3 +173,132 @@ describe("parseFirewallDrops ICMP errors", () => {
   });
 });
 
+
+describe("egressFindings", () => {
+  const at = new Date(T0 + 12_000).toISOString();
+  const fw = (o: Partial<Extract<ContainmentEntry, { source: "firewall" }>>): ContainmentEntry =>
+    ({ source: "firewall", at, stage: "install", direction: "egress", proto: "tcp", dst: "192.0.2.1", dport: 443, ...o }) as ContainmentEntry;
+  const px = (o: Partial<Extract<ContainmentEntry, { source: "proxy" }>>): ContainmentEntry =>
+    ({ source: "proxy", at, stage: "install", verdict: "blocked", method: "GET", host: "evil.example", path: "/x", reason: "host not allowed in stage install", ...o }) as ContainmentEntry;
+
+  it("flags a direct install-time connection as a critical, confirmed supply-chain finding", () => {
+    const out = egressFindings([fw({})]);
+    expect(out).toHaveLength(1);
+    const f = Finding.parse(out[0]);
+    expect(f).toMatchObject({ id: "f-egress-direct", severity: "critical", category: "supply_chain", confirmed: true });
+    expect(f.evidence[0]).toMatchObject({ kind: "network", control: "firewall", target: "tcp 192.0.2.1:443", stage: "install" });
+    expect(f.description).toContain("192.0.2.1:443");
+  });
+
+  it("rates DNS-only drops medium", () => {
+    expect(egressFindings([fw({ proto: "udp", dst: "10.0.0.2", dport: 53 })])[0]).toMatchObject({ severity: "medium" });
+  });
+
+  it("ignores run/dynamic, allowed traffic, untagged entries and exfil rows", () => {
+    expect(
+      egressFindings([
+        fw({ stage: "run" }),
+        fw({ stage: "dynamic" }),
+        fw({ stage: null }),
+        px({ stage: "run", host: "api.openai.com" }),
+        px({ verdict: "allowed", host: "registry.npmjs.org" }),
+        px({ verdict: "exfil" }),
+        px({ reason: "no active audit" }),
+        { source: "limit", at, stage: "install", limit: "stage_timeout", detail: "x" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("rates a plain blocked GET medium and an evasive or data-carrying block high", () => {
+    expect(egressFindings([px({})])[0]).toMatchObject({ id: "f-egress-blocked", severity: "medium" });
+    expect(egressFindings([px({ method: "POST", reason: "POST not allowed in stage install" })])[0]!.severity).toBe("high");
+    expect(egressFindings([px({ method: undefined, host: undefined, reason: "raw TCP not allowed" })])[0]!.severity).toBe("high");
+    expect(egressFindings([px({ stage: "build", reason: "IP-literal hosts are not allowed", host: "1.2.3.4" })])[0]!.severity).toBe("high");
+  });
+
+  it("caps evidence, lists hosts boundedly, puts evasive evidence first and counts repeats", () => {
+    const many = Array.from({ length: 12 }, (_, i) => px({ host: `h${i}.example` }));
+    const out = egressFindings([...many, px({ method: "POST", reason: "POST not allowed in stage install", repeat: 3 })]);
+    const f = Finding.parse(out[0]);
+    expect(f.evidence).toHaveLength(5);
+    expect(f.evidence[0]).toMatchObject({ kind: "network", target: "POST evil.example/x" });
+    expect(f.description).toContain("15 request(s)");
+    expect(f.description).toMatch(/and \d+ more/);
+  });
+
+  it("emits one finding per control when both fired", () => {
+    expect(egressFindings([fw({}), px({})]).map((f) => f.id)).toEqual(["f-egress-direct", "f-egress-blocked"]);
+  });
+});
+
+describe("readProxyEvents + egressFindings under floods", () => {
+  it("counts sampled blocked repeats as deltas, not running totals", async () => {
+    const path = join(dir, "blk-repeat.jsonl");
+    const base = { auditId: "me", stage: "install", kind: "blocked", method: "CONNECT", host: "evil.example", reason: "host not allowed in stage install" };
+    const l: string[] = [];
+    for (let i = 0; i < 20; i++) l.push(line({ ...base, ts: ts(T0 + 11_000) }));
+    for (const n of [100, 200, 300]) l.push(line({ ...base, ts: ts(T0 + 12_000), repeat: n }));
+    await writeFile(path, l.join(""));
+    const r = await readProxyEvents({ auditId: "me", offset: 0, windowStartMs: T0, windowEndMs: T0 + 1e6, marks, path });
+    const f = egressFindings(r.entries)[0]!;
+    expect(f.description).toContain("300 request(s)");
+  });
+
+  it("keeps an evasive request that follows a flood of plain ones, and the overflow still counts", async () => {
+    const path = join(dir, "blk-flood.jsonl");
+    const l: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      l.push(line({ ts: ts(T0 + 11_000), auditId: "me", stage: "install", kind: "blocked", method: "CONNECT", host: `h${i}.example`, reason: "host not allowed in stage install" }));
+    }
+    l.push(line({ ts: ts(T0 + 12_000), auditId: "me", stage: "install", kind: "blocked", reason: "raw TCP not allowed" }));
+    await writeFile(path, l.join(""));
+    const r = await readProxyEvents({ auditId: "me", offset: 0, windowStartMs: T0, windowEndMs: T0 + 1e6, marks, path });
+    const f = egressFindings(r.entries)[0]!;
+    expect(f.severity).toBe("high");
+    expect(f.title).toContain("refused");
+    expect(f.description).toContain("401 request(s)");
+    expect(f.evidence[0]).toMatchObject({ kind: "network", detail: "raw TCP not allowed" });
+  });
+
+  it("a flood of plain blocks alone is high", () => {
+    const at = new Date(T0 + 12_000).toISOString();
+    const out = egressFindings([
+      { source: "proxy", at, stage: "install", verdict: "blocked", method: "GET", host: "a.example", reason: "host not allowed in stage install" },
+      { source: "proxy", at, stage: "install", verdict: "blocked", reason: "350 more blocked event(s) not listed", repeat: 350 },
+    ]);
+    expect(out[0]).toMatchObject({ severity: "high", id: "f-egress-blocked" });
+  });
+
+  it("an overflow row alone still yields a finding with evidence", () => {
+    const at = new Date(T0 + 12_000).toISOString();
+    const f = Finding.parse(egressFindings([{ source: "proxy", at, stage: "build", verdict: "blocked", reason: "40 more blocked event(s) not listed", repeat: 40 }])[0]);
+    expect(f.severity).toBe("medium");
+    expect(f.description).toContain("During build");
+  });
+
+  it("known tool telemetry is info, and an evasive request to the same host is not excused", () => {
+    const at = new Date(T0 + 12_000).toISOString();
+    const base = { source: "proxy" as const, at, stage: "build" as const, verdict: "blocked" as const, host: "telemetry.nextjs.org", reason: "host not allowed in stage build" };
+    expect(egressFindings([{ ...base, method: "CONNECT" }])[0]).toMatchObject({ severity: "info" });
+    expect(egressFindings([{ ...base, method: "CONNECT" }, { ...base, method: "CONNECT", host: "evil.example" }])[0]!.severity).toBe("medium");
+    expect(egressFindings([{ ...base, method: "POST", reason: "POST not allowed in stage build" }])[0]!.severity).toBe("high");
+  });
+
+  it("many DNS-only drops are high", () => {
+    const at = new Date(T0 + 12_000).toISOString();
+    const dns = Array.from({ length: 25 }, () => ({ source: "firewall" as const, at, stage: "install" as const, direction: "egress" as const, proto: "udp", dst: "10.0.0.2", dport: 53 }));
+    expect(egressFindings(dns)[0]).toMatchObject({ severity: "high" });
+  });
+});
+
+describe("egressFindings known hosts", () => {
+  const at = new Date(T0 + 12_000).toISOString();
+  const b = (host: string, stage: "install" | "build") =>
+    ({ source: "proxy", at, stage, verdict: "blocked", method: "CONNECT", host, reason: `host not allowed in stage ${stage}` }) as ContainmentEntry;
+  it("does not excuse attacker-hostable CDNs", () => {
+    expect(egressFindings([b("storage.googleapis.com", "install")])[0]!.severity).toBe("medium");
+  });
+  it("treats registry pokes during build as known tool traffic", () => {
+    expect(egressFindings([b("registry.npmjs.org", "build")])[0]!.severity).toBe("info");
+  });
+});

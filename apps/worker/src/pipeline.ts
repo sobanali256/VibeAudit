@@ -28,7 +28,7 @@ import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { clearProxyState, writeProxyState } from "./proxy-state";
-import { type StageMark, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents } from "./containment";
+import { type StageMark, egressFindings, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents } from "./containment";
 
 export interface PipelineDeps {
   sql: Sql;
@@ -70,6 +70,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
   const proxyOffset = await proxyLogOffset();
   const marks: StageMark[] = [];
   const limitHits: ContainmentEntry[] = [];
+  let containment: ContainmentEntry[] | undefined;
   const enter = async (name: AuditStage) => {
     marks.push({ stage: name, at: Date.now() });
     await stage(sql, id, name);
@@ -221,7 +222,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // --- report ---
     await enter("report");
     const status = staticOnly ? "static_only" : "completed";
-    const containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
+    containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
     const report: Report = {
       auditId: id,
       source: audit.source,
@@ -247,7 +248,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // then hangs is exactly the case whose containment log matters most.
     let partial: Report | undefined;
     try {
-      const containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
+      // Assembled already if the failure came after the report was built (e.g. finishAudit):
+      // reuse it, since assembling again would add its findings to `findings` a second time.
+      containment ??= await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
       partial = {
         auditId: id,
         source: audit.source,
@@ -322,7 +325,8 @@ function buildApprovalRequest(id: string, plan: Plan, manifest: { packageJson: R
       startCommand: plan.startCommand,
       port: plan.port,
     },
-    env: plan.env,
+    // Show what will really happen: reserved names get nothing planted (see isReservedEnv).
+    env: plan.env.map((e) => (isReservedEnv(e.name) ? { ...e, provide: "empty" as const } : e)),
     installScripts,
     expiresAt: new Date(Date.now() + APPROVAL_TTL_MS).toISOString(),
   };
@@ -344,11 +348,26 @@ async function waitForDecision(sql: Sql, id: string, pollMs: number, deadlineMs:
   }
 }
 
+/**
+ * Names the sandbox sets itself (proxy, CA, runtime, telemetry opt-outs). A repo declaring one
+ * in .env.example must not get a canary or placeholder there: the caller env is appended after
+ * the container flags and Docker keeps the last --env, so it would knock the app off the proxy
+ * (and turn its traffic into firewall drops, a false supply-chain finding) or break node.
+ */
+export function isReservedEnv(name: string): boolean {
+  return (
+    /^(?:https?|no|all)_proxy$/i.test(name) ||
+    /^(?:YARN|NODE|NPM_CONFIG|PNPM)_/i.test(name) ||
+    ["SSL_CERT_FILE", "PORT", "PATH", "HOME"].includes(name) ||
+    Object.hasOwn(TELEMETRY_OPT_OUT, name)
+  );
+}
+
 /** A canary stub per env var that isn't getting a real test key. */
 function planCanaries(plan: Plan, id: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const e of plan.env) {
-    if (e.provide === "canary") out[e.name] = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
+    if (e.provide === "canary" && !isReservedEnv(e.name)) out[e.name] = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
   }
   // Always plant at least one canary so exfil detection is live even with no declared env.
   if (Object.keys(out).length === 0) out.VIBEAUDIT_CANARY = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
@@ -364,13 +383,38 @@ function proxyKeys(testKeys: Record<string, string>): ProxyState["keys"] {
   return keys;
 }
 
+const TELEMETRY_OPT_OUT: Record<string, string> = {
+  NEXT_TELEMETRY_DISABLED: "1",
+  CHECKPOINT_DISABLE: "1", // Prisma
+  DO_NOT_TRACK: "1",
+  NUXT_TELEMETRY_DISABLED: "1",
+  ASTRO_TELEMETRY_DISABLED: "1",
+  GATSBY_TELEMETRY_DISABLED: "1",
+  STORYBOOK_DISABLE_TELEMETRY: "1",
+  TURBO_TELEMETRY_DISABLED: "1",
+  NG_CLI_ANALYTICS: "false",
+  // Update checks and Next's lockfile patcher hit the npm registry, which build doesn't allow.
+  NO_UPDATE_NOTIFIER: "1",
+  npm_config_update_notifier: "false",
+  NEXT_IGNORE_INCORRECT_LOCKFILE: "1",
+  // Browser/binary downloads go to CDNs anyone can host on (storage.googleapis.com...), so
+  // they aren't excused as "known" hosts; skip them at the source instead.
+  PUPPETEER_SKIP_DOWNLOAD: "1",
+  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1",
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+  CYPRESS_INSTALL_BINARY: "0",
+  SENTRYCLI_SKIP_DOWNLOAD: "1",
+};
+
 function sandboxEnv(plan: Plan, canaries: Record<string, string>, id: string, testKeys: Record<string, string>, includeKeys: boolean): Record<string, string> {
-  const env: Record<string, string> = { ...canaries };
+  // Opt well-known tools out of telemetry: their phone-home calls would otherwise show up as
+  // blocked install/build egress (a supply-chain finding) on every Next.js or Prisma repo.
+  const env: Record<string, string> = { ...canaries, ...TELEMETRY_OPT_OUT };
   if (includeKeys) {
     for (const e of plan.env) {
       // Only hand the app a placeholder when a real test key backs it; otherwise the proxy
       // has no swap rule and the bare placeholder would just egress and fail auth.
-      if (e.provide === "placeholder" && testKeys[e.name]) env[e.name] = keyPlaceholder(e.name, id);
+      if (e.provide === "placeholder" && testKeys[e.name] && !isReservedEnv(e.name)) env[e.name] = keyPlaceholder(e.name, id);
     }
   }
   return env;
@@ -559,6 +603,11 @@ async function assembleContainment(
     readProxyEvents({ auditId: id, offset: proxyOffset, windowStartMs, windowEndMs, marks }).catch(() => ({ entries: [], findings: [] })),
     sandbox.firewallLog().catch(() => ""),
   ]);
-  findings.push(...proxy.findings);
-  return mergeContainment(proxy.entries, parseFirewallDrops(fwText, marks, windowStartMs), limitHits);
+  const fw = parseFirewallDrops(fwText, marks, windowStartMs);
+  // Egress stopped during install/build is a finding of its own, not only a containment row.
+  const merged = mergeContainment(proxy.entries, fw, limitHits);
+  // Push last, after everything that can throw: the failure path re-assembles if this one
+  // threw, and must not find these findings already added.
+  findings.push(...proxy.findings, ...egressFindings([...proxy.entries, ...fw]));
+  return merged;
 }
