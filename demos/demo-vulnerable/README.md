@@ -15,6 +15,8 @@ Runtime-confirmed findings (the audit proves each one by running the app and hit
 - stack traces leaked by `/api/crash`
 - an unauthenticated AI proxy (`/api/chat`)
 - wildcard CORS
+- an admin console at `/admin` served to anyone, listing every user with delete buttons
+  (screenshotted by the logged-out browser pass and confirmed by the vision check)
 
 Static suspicions (flagged by the LLM code review; they can't be proven just by running the app):
 - a hard-coded admin password compared in plain text (`/api/login` vs `ADMIN_PASSWORD`)

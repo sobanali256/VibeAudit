@@ -75,6 +75,9 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+// PLANTED FLAW: the admin console is served to anyone; the "login" is only a link in the UI.
+app.get("/admin", (req, res) => res.sendFile(path.join(__dirname, "public", "admin.html")));
+
 app.use(express.static(path.join(__dirname, "public")));
 
 app.use((err, req, res, next) => {

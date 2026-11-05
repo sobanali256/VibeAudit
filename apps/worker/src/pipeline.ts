@@ -33,6 +33,7 @@ import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { clearProxyState, writeProxyState } from "./proxy-state";
 import { type PageCapture, browse, worthKeeping } from "./browse";
+import { verdictLine, verifyPages, visionCandidates, visionFindings } from "./vision";
 import { type StageMark, egressFindings, mergeContainment, parseFirewallDrops, proxyLogOffset, readProxyEvents } from "./containment";
 
 export interface PipelineDeps {
@@ -45,6 +46,8 @@ export interface PipelineDeps {
   llm?: LlmClient;
   /** Advisory database for the dependency audit. Absent = skip it. */
   osv?: OsvClient;
+  /** Multimodal model for the verify stage (screenshots). Absent = skip verification. */
+  vision?: LlmClient;
   /** Poll interval while waiting for the human approval decision. */
   approvalPollMs?: number;
 }
@@ -259,6 +262,28 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
             captures = got.captures;
           }
         }
+      }
+    }
+
+    // --- verify: a vision model looks at what the browser saw, logged out ---
+    if (deps.vision && pages && captures.length) {
+      const candidates = visionCandidates(worthKeeping(captures));
+      if (!candidates.length) {
+        await ev(sql, id, "log", { stage: "dynamic", msg: "vision: no pages to check (nothing beyond the home page served content of its own)" }).catch(() => {});
+      } else {
+        await enter("verify");
+        const { verdicts, failed } = await verifyPages(deps.vision, candidates);
+        const shots = new Map(pages.flatMap((p) => (p.screenshot ? [[p.path, p.screenshot] as const] : [])));
+        const found = visionFindings(verdicts, captures, shots);
+        findings.push(...found);
+        for (const v of verdicts) {
+          const page = pages.find((p) => p.path === v.path);
+          if (page) page.verdict = verdictLine(v.verdict);
+        }
+        await ev(sql, id, "log", {
+          stage: "verify",
+          msg: `vision: ${verdicts.length} of ${candidates.length} page(s) checked, ${found.length} exposed${failed ? `, ${failed} unanswered` : ""}`,
+        }).catch(() => {});
       }
     }
 

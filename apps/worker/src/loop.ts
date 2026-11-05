@@ -13,6 +13,8 @@ export interface LoopConfig {
   /** LLM client for the static review stage (optional). */
   llm?: LlmClient;
   osv?: OsvClient;
+  /** Multimodal model for the verify stage (optional). */
+  vision?: LlmClient;
   /** Fallback poll even without a NOTIFY (also drives the stale-audit sweep). */
   pollMs?: number;
 }
@@ -44,7 +46,7 @@ export async function runLoop(cfg: LoopConfig): Promise<() => Promise<void>> {
         if (!audit) break;
         console.log(`[worker] running audit ${audit.id}`);
         const sandbox = new Sandbox(audit.id, cfg.proxyUrl, cliDocker(cfg.dockerHost));
-        await runAudit(audit, { sql, sandbox, proxyUrl: cfg.proxyUrl, token: cfg.githubToken, llm: cfg.llm, osv: cfg.osv });
+        await runAudit(audit, { sql, sandbox, proxyUrl: cfg.proxyUrl, token: cfg.githubToken, llm: cfg.llm, osv: cfg.osv, vision: cfg.vision });
         console.log(`[worker] finished audit ${audit.id}`);
       }
     } finally {

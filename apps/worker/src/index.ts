@@ -24,6 +24,11 @@ async function main() {
     model: config.PLANNER_MODEL,
   });
 
+  // Screenshot verifier: same endpoint and key, the multimodal model. Optional.
+  const vision = config.VISION_MODEL
+    ? createLlm({ baseUrl: config.VULTR_INFERENCE_BASE_URL, apiKey: config.VULTR_INFERENCE_API_KEY, model: config.VISION_MODEL })
+    : undefined;
+
   const stop = await runLoop({
     sql,
     dockerHost: config.SANDBOX_DOCKER_HOST,
@@ -31,6 +36,7 @@ async function main() {
     githubToken: config.GITHUB_TOKEN,
     llm,
     osv: createOsv(),
+    vision,
   });
 
   const shutdown = async (sig: string) => {

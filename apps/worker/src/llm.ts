@@ -5,7 +5,7 @@
 
 export interface LlmClient {
   /** One non-streaming completion. Returns the assistant message content (may be empty). */
-  complete(opts: { system: string; user: string; maxTokens?: number; timeoutMs?: number }): Promise<string>;
+  complete(opts: { system: string; user: string; maxTokens?: number; timeoutMs?: number; images?: readonly Buffer[] }): Promise<string>;
 }
 
 export interface LlmConfig {
@@ -16,7 +16,7 @@ export interface LlmConfig {
 
 export function createLlm(cfg: LlmConfig): LlmClient {
   return {
-    async complete({ system, user, maxTokens = 1500, timeoutMs = 60_000 }) {
+    async complete({ system, user, maxTokens = 1500, timeoutMs = 60_000, images }) {
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), timeoutMs);
       try {
@@ -29,7 +29,16 @@ export function createLlm(cfg: LlmConfig): LlmClient {
             max_tokens: maxTokens,
             messages: [
               { role: "system", content: system },
-              { role: "user", content: user },
+              {
+                role: "user",
+                // Images (JPEG screenshots for the vision model) ride along as data URLs.
+                content: images?.length
+                  ? [
+                      { type: "text", text: user },
+                      ...images.map((b) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${b.toString("base64")}` } })),
+                    ]
+                  : user,
+              },
             ],
           }),
           signal: ctl.signal,
