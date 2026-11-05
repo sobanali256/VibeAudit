@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { rename, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { AuditStage, type ContainmentEntry, type Finding, ProxyEvent } from "@vibeaudit/shared";
+import { AuditStage, type ContainmentEntry, type Finding, KEY_PROVIDERS, ProxyEvent } from "@vibeaudit/shared";
 
 /**
  * Containment log: every time the sandbox reached for the network (and a control let it
@@ -336,6 +336,16 @@ const isKnownToolBlock = (e: ProxyEntry) => {
   return KNOWN_TOOL_HOSTS.has(h) || (e.stage === "build" && REGISTRY_HOSTS.has(h));
 };
 
+/** Hosts of the providers the sandbox plants key slots for (api.openai.com...). */
+const PROVIDER_HOSTS = new Set(Object.values(KEY_PROVIDERS).flat());
+/**
+ * The app calling its own AI/payments API while it builds (a statically generated page that asks
+ * OpenAI for text): its key slot holds a canary, the build stage allows no API host, so the call
+ * is blocked. That is the app doing its job, not install-time code reaching out: it stays in
+ * the containment log but isn't a supply-chain finding. Only plain requests qualify.
+ */
+const isOwnApiAtBuild = (e: ProxyEntry) => e.stage === "build" && PROVIDER_HOSTS.has(stripPort(e.host ?? "")) && !isEvasiveBlock(e);
+
 /** A block that isn't just "a GET to a host off the allowlist": raw socket, IP literal, odd port, a body, an upgrade... */
 export function isEvasiveBlock(e: { reason?: string; method?: string }): boolean {
   if (!PLAIN_HOST_BLOCK.test(e.reason ?? "")) return true;
@@ -371,7 +381,7 @@ export function egressFindings(entries: readonly ContainmentEntry[]): Finding[] 
   for (const e of entries) {
     if (!e.stage || !SUPPLY_CHAIN_STAGES.has(e.stage)) continue;
     if (e.source === "firewall") fw.push(e);
-    else if (e.source === "proxy" && e.verdict === "blocked" && !/^no active audit/.test(e.reason ?? "")) {
+    else if (e.source === "proxy" && e.verdict === "blocked" && !/^no active audit/.test(e.reason ?? "") && !isOwnApiAtBuild(e)) {
       pxStages.push(e);
       if (!e.host && !e.method && OVERFLOW_ROW.test(e.reason ?? "")) overflow += e.repeat ?? 0;
       else px.push(e);

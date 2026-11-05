@@ -131,24 +131,33 @@ function lineSnippet(files: SourceFile[], file: string | undefined, line: number
  * model output is untrusted and fully validated here; nothing from it is executed.
  */
 export async function llmReview(files: SourceFile[], llm: LlmClient): Promise<Finding[]> {
-  if (files.length === 0) return [];
+  return (await llmReviewDetailed(files, llm)).findings;
+}
+
+/** As llmReview, plus whether the model gave a usable answer (so "0 findings" ≠ "failed"). */
+export async function llmReviewDetailed(files: SourceFile[], llm: LlmClient): Promise<{ findings: Finding[]; answered: boolean; lastError?: string }> {
+  if (files.length === 0) return { findings: [], answered: false };
   // glm-5.3 is a reasoning model. Left alone it can spend the whole completion budget on hidden
   // reasoning and return empty content (zero findings, silently, about 1 run in 3), so cap its
   // reasoning, keep generous headroom, and ask once more if a reply still isn't a JSON array.
   const user = buildUserPrompt(files);
   let arr: unknown;
   let effort: "medium" | undefined = "medium";
+  let lastError: string | undefined;
   for (let attempt = 0; attempt < 2 && !Array.isArray(arr); attempt++) {
     try {
       const raw = await llm.complete({ system: SYSTEM_PROMPT, user, maxTokens: 8000, timeoutMs: 60_000, reasoningEffort: effort });
       arr = extractJsonArray(raw);
     } catch (e) {
+      // Only our own error text (e.g. "inference HTTP 503", an abort): llm.ts never puts the
+      // response body in it.
+      lastError = String((e as Error)?.message ?? e).slice(0, 120);
       // A model that rejects the reasoning field (HTTP 4xx) gets one try without it; otherwise
       // (down, timed out) one plain retry, then give up: the audit never fails on this.
       if (/HTTP 4\d\d/.test(String((e as Error)?.message))) effort = undefined;
     }
   }
-  if (!Array.isArray(arr)) return [];
+  if (!Array.isArray(arr)) return { findings: [], answered: false, lastError: lastError ?? "reply was not a JSON array" };
 
   const findings: Finding[] = [];
   for (const item of arr) {
@@ -173,5 +182,5 @@ export async function llmReview(files: SourceFile[], llm: LlmClient): Promise<Fi
     });
     if (findings.length >= MAX_LLM_FINDINGS) break;
   }
-  return findings;
+  return { findings, answered: true };
 }

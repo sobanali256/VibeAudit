@@ -31,6 +31,23 @@ describe("planFromManifest", () => {
     expect(p.framework).toBe("vite");
     expect(p.packageManager).toBe("yarn");
     expect(p.installCommand).toContain("yarn install");
+    // No start script: preview, bound to all interfaces on the planned port.
+    expect(p.startCommand).toBe("yarn run preview --host 0.0.0.0 --port 3000 --strictPort");
+    expect(p.port).toBe(3000);
+  });
+
+  it("starts a Vite app via preview (npm needs --), or vite itself with no preview script", () => {
+    const npm = planFromManifest(m({ devDependencies: { vite: "7" }, scripts: { build: "vite build", preview: "vite preview" } }, ["package-lock.json"]));
+    expect(npm.startCommand).toBe("npm run preview -- --host 0.0.0.0 --port 3000 --strictPort");
+    const bare = planFromManifest(m({ devDependencies: { vite: "7" }, scripts: { build: "vite build" } }));
+    expect(bare.startCommand).toBe("npx --no-install vite preview --host 0.0.0.0 --port 3000 --strictPort");
+    // Without a preview script, each package manager's own exec form (Yarn PnP has no .bin).
+    expect(planFromManifest(m({ devDependencies: { vite: "7" } }, ["pnpm-lock.yaml"])).startCommand).toBe("pnpm exec vite preview --host 0.0.0.0 --port 3000 --strictPort");
+    expect(planFromManifest(m({ devDependencies: { vite: "7" } }, ["yarn.lock"])).startCommand).toBe("yarn vite preview --host 0.0.0.0 --port 3000 --strictPort");
+    // A full-stack app with its own server runs the server, not preview.
+    expect(planFromManifest(m({ main: "server.js", dependencies: { express: "4" }, devDependencies: { vite: "7" }, scripts: { build: "vite build" } })).startCommand).toBe("node server.js");
+    // An explicit start script still wins.
+    expect(planFromManifest(m({ devDependencies: { vite: "7" }, scripts: { start: "node server.js" } })).startCommand).toBe("npm run start");
   });
 
   it("falls back to node main for a plain server, and unknown with no runner", () => {

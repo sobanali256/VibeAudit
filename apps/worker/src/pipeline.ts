@@ -28,7 +28,7 @@ import {
   type Sql,
 } from "@vibeaudit/db";
 import { MAX_DECLARED_ENV, type Plan, planFromManifest } from "./planner";
-import { collectSources, llmReview } from "./review";
+import { collectSources, llmReviewDetailed } from "./review";
 import { type OsvClient, type PackageList, dependencyFindings, listPackages, mergePackageLists } from "./deps";
 import { EXAMPLE_FILE, type SecretHit, bundleLeakFindings, bundleRoots, collectBundleFiles, collectRepoFiles, maskFinding, maskSecrets, scanFiles, secretFindings } from "./secrets";
 import type { LlmClient } from "./llm";
@@ -247,10 +247,17 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     if (deps.llm) {
       try {
         const sources = await collectSources(sandbox, image, id);
-        const llmFindings = await llmReview(sources, deps.llm);
+        const { findings: llmFindings, answered, lastError } = await llmReviewDetailed(sources, deps.llm);
         clock.check();
         findings.push(...llmFindings);
-        await ev(sql, id, "log", { stage: "static", msg: `LLM review: ${llmFindings.length} finding(s) from ${sources.length} file(s)` });
+        await ev(sql, id, "log", {
+          stage: "static",
+          msg: !sources.length
+            ? "LLM review: no source files to review"
+            : answered
+              ? `LLM review: ${llmFindings.length} finding(s) from ${sources.length} file(s)`
+              : `LLM review failed: no usable answer from the model after 2 tries (${lastError ?? "unknown"}; ${sources.length} file(s))`,
+        });
       } catch (e) {
         await ev(sql, id, "log", { stage: "static", msg: `static review skipped: ${String((e as Error)?.message ?? e).slice(0, 200)}` }).catch(() => {});
       }
@@ -590,11 +597,14 @@ export function isReservedEnv(name: string): boolean {
   );
 }
 
-/** A canary stub per env var that isn't getting a real test key. */
+/** A canary per secret-looking env var and per test-key slot (replaced by the placeholder at build/run when a key is given), plus the generic one. */
 function planCanaries(plan: Plan, id: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const e of plan.env) {
-    if (e.provide === "canary" && !isReservedEnv(e.name)) out[e.name] = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
+    // A test-key slot gets a canary too: without one, SDKs like openai refuse to even start
+    // ("OPENAI_API_KEY is missing"). When the user supplies a key, the placeholder replaces it
+    // for build and run (sandboxEnv); with no key, calls to the provider are simply blocked.
+    if ((e.provide === "canary" || e.provide === "placeholder") && !isReservedEnv(e.name)) out[e.name] = `AKIAVIBE${randomBytes(9).toString("hex").toUpperCase()}`;
   }
   // Always plant the generic canary: the app never reads it, so it leaving the sandbox in any
   // stage means something dumped the environment.

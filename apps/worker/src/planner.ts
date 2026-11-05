@@ -54,6 +54,8 @@ function detectPackageManager(lockfiles: string[], pkg: Record<string, unknown>)
   return "npm";
 }
 
+const hasServerFramework = (deps: Record<string, string>) => !!(deps.express || deps.fastify || deps.koa || deps["@hapi/hapi"]);
+
 function detectFramework(deps: Record<string, string>, scripts: Record<string, string>): Framework {
   if (deps.next) return "nextjs";
   const scriptText = Object.values(scripts).join(" ");
@@ -115,6 +117,16 @@ export function planFromManifest(m: Manifest, opts: { declaredEnvNames?: string[
   let startCommand: string | null = null;
   if (scripts.start) startCommand = `${run} start`;
   else if (framework === "nextjs") startCommand = `${run} start`;
+  // Vite apps (Lovable, Bolt...) usually have no start script, only `preview`. Vite preview
+  // listens on localhost:4173 by default, unreachable from the probe container: bind it to all
+  // interfaces on the planned port. (npm needs `--` to pass flags through to the script.)
+  // Not for a full-stack app with its own server (express + vite, "main": "server.js"): the
+  // server is the thing to probe, and preview would only serve the static build.
+  else if (framework === "vite" && !hasServerFramework(deps)) {
+    const flags = "--host 0.0.0.0 --port 3000 --strictPort";
+    const exec = { npm: "npx --no-install vite", pnpm: "pnpm exec vite", yarn: "yarn vite", bun: "bun run vite" }[pm];
+    startCommand = scripts.preview ? (pm === "npm" ? `npm run preview -- ${flags}` : `${pm} run preview ${flags}`) : `${exec} preview ${flags}`;
+  }
   else if (typeof pkg.main === "string" && isSafeRelPath(pkg.main)) startCommand = `node ${pkg.main}`;
   else startCommand = framework === "express" ? "node server.js" : null;
 

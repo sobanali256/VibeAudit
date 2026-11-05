@@ -92,6 +92,13 @@ ExecStart=/usr/local/sbin/vibeaudit-proxy-guard
 WantedBy=multi-user.target
 EOF
 
+# body_size_limit: mitmproxy kills ANY body over it with a 502, streamed or not, so it must sit
+# above the largest legitimate package tarball (next, @next/swc and Prisma engines are 30-60 MB;
+# 16m broke every Next.js install). Bodies without a key ride streamed and don't count against
+# memory. Two cases are buffered before the addon's own caps apply (1 MB request bodies, 8 MB
+# responses to key-bearing requests): an HTTP/2 GET that sends DATA frames without a length,
+# and a chunked response from a provider API to a key-bearing call. Each can pin up to this much
+# memory; MemoryMax (1G) bounds the total, and an OOM restart fails closed (accepted risk).
 cat > /etc/systemd/system/vibeaudit-proxy.service <<EOF
 [Unit]
 Description=VibeAudit egress proxy (mitmproxy)
@@ -111,7 +118,7 @@ ExecStart=/opt/vibeaudit/mitm/bin/mitmdump --quiet \\
   --set ssl_insecure=false \\
   --set block_global=true \\
   --set rawtcp=false \\
-  --set body_size_limit=16m \\
+  --set body_size_limit=256m \\
   -s /opt/vibeaudit/vibeaudit_proxy.py
 Restart=on-failure
 RestartSec=2

@@ -212,6 +212,13 @@ describe("egressFindings", () => {
     ).toEqual([]);
   });
 
+  it("doesn't flag the app calling its own provider API at build, but does at install or when evasive", () => {
+    const own = px({ stage: "build", host: "api.openai.com:443", method: "CONNECT", path: undefined, reason: "host not allowed in stage build" });
+    expect(egressFindings([own])).toEqual([]);
+    expect(egressFindings([px({ stage: "install", host: "api.openai.com" })])).toHaveLength(1);
+    expect(egressFindings([px({ stage: "build", host: "api.openai.com", reason: "IP-literal hosts are not allowed" })])).toHaveLength(1);
+  });
+
   it("rates a plain blocked GET medium and an evasive or data-carrying block high", () => {
     expect(egressFindings([px({})])[0]).toMatchObject({ id: "f-egress-blocked", severity: "medium" });
     expect(egressFindings([px({ method: "POST", reason: "POST not allowed in stage install" })])[0]!.severity).toBe("high");

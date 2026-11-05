@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { llmReview, collectSources, type SourceFile } from "./review";
+import { llmReview, llmReviewDetailed, collectSources, type SourceFile } from "./review";
 import { type LlmClient, createLlm } from "./llm";
 import type { Sandbox, ExecResult, RunSpec } from "./sandbox";
 
@@ -118,6 +118,12 @@ describe("llmReview", () => {
     }
     expect(bodies[0]!.reasoning_effort).toBe("medium");
     expect("reasoning_effort" in bodies[1]!).toBe(false);
+  });
+
+  it("llmReviewDetailed tells a clean answer from a failure", async () => {
+    expect(await llmReviewDetailed(files, fixedLlm("[]"))).toEqual({ findings: [], answered: true });
+    expect(await llmReviewDetailed(files, fixedLlm(""))).toEqual({ findings: [], answered: false, lastError: "reply was not a JSON array" });
+    expect(await llmReviewDetailed([], fixedLlm("[]"))).toEqual({ findings: [], answered: false });
   });
 
   it("a valid empty array is an answer, not a failure (no retry)", async () => {
