@@ -738,6 +738,11 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
   // A battery of unauthenticated/forged requests. Each finding is runtime-confirmed by the
   // response. One probe throwing must not drop the others, so each runs under `safe`.
   const results: Record<string, number> = {};
+  // Control: an app that answers unknown paths with 200 (an SPA fallback serving index.html)
+  // would otherwise "prove" every GET probe. Then only a JSON body counts as an API answer.
+  const fallback = await call(`/api/vibeaudit-no-such-route-${randomBytes(4).toString("hex")}`).catch(() => null);
+  const looksJson = (body: string) => /^\s*[[{]/.test(body);
+  const json = (body: string) => fallback?.status !== 200 || looksJson(body);
   const safe = async (label: string, fn: () => Promise<void>) => {
     try {
       await fn();
@@ -751,7 +756,7 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
   await safe("users", async () => {
     const users = await call("/api/users");
     results.users = users.status;
-    if (users.status === 200 && /passwordHash|password/i.test(users.body)) {
+    if (users.status === 200 && json(users.body) && /passwordHash|password/i.test(users.body)) {
       findings.push(mkFinding("f-users", "critical", "missing_auth", "User records exposed without authentication",
         "GET /api/users returns the full user table, including password hashes, with no authentication.", true,
         [{ kind: "http", method: "GET", url: "/api/users", status: 200, bodyExcerpt: users.body.slice(0, 300) }], "probe"));
@@ -761,7 +766,7 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
   await safe("debug", async () => {
     const debug = await call("/api/debug");
     results.debug = debug.status;
-    if (debug.status === 200 && /env|process/i.test(debug.body)) {
+    if (debug.status === 200 && json(debug.body) && /env|process/i.test(debug.body)) {
       findings.push(mkFinding("f-debug", "high", "secret_exposure", "Debug endpoint dumps the environment",
         "GET /api/debug returns process environment variables and server internals to any caller.", true,
         [{ kind: "http", method: "GET", url: "/api/debug", status: 200, bodyExcerpt: debug.body.slice(0, 300) }], "probe"));
@@ -773,7 +778,7 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
     const own = await call("/api/notes/1");
     const other = await call("/api/notes/2");
     results.idor = other.status;
-    if (other.status === 200 && own.status === 200 && /"(text|ownerId)"/i.test(other.body)) {
+    if (other.status === 200 && own.status === 200 && json(other.body) && /"(text|ownerId)"/i.test(other.body)) {
       findings.push(mkFinding("f-idor", "high", "missing_auth", "Any record readable by id (IDOR)",
         "GET /api/notes/:id returns a record for any id with no authentication or ownership check, so one user can read another's data.", true,
         [{ kind: "http", method: "GET", url: "/api/notes/2", status: other.status, bodyExcerpt: other.body.slice(0, 300) }], "probe"));
@@ -784,7 +789,9 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
   await safe("admin-header", async () => {
     const forged = await call("/api/admin/delete-user", { method: "POST", headers: ["Content-Type: application/json", "x-user-role: admin"], data: '{"id":3}' });
     results["admin-header"] = forged.status;
-    if (forged.status >= 200 && forged.status < 300 && /"ok"|success/i.test(forged.body)) {
+    // A JSON answer only: an all-methods fallback (app.all("*") serving index.html) answers this
+    // POST with 200 HTML, and any page with class="text-success" would match.
+    if (forged.status >= 200 && forged.status < 300 && looksJson(forged.body) && /"ok"|success/i.test(forged.body)) {
       findings.push(mkFinding("f-admin-header", "critical", "missing_auth", "Admin action authorized by a client-supplied header",
         "POST /api/admin/delete-user performs a privileged action when the request sets x-user-role: admin, a value any client controls, so anyone can act as an administrator.", true,
         [{ kind: "http", method: "POST", url: "/api/admin/delete-user", status: forged.status, bodyExcerpt: forged.body.slice(0, 200) }], "probe"));
@@ -798,7 +805,16 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
     results.chat = chat.status;
     // A real HTTP response that wasn't an auth gate or a 404. `status >= 200` excludes 0, which
     // the parser produces for a timeout / no response (curl %{http_code}=000) — never a finding.
-    if (chat.status >= 200 && chat.status !== 404 && chat.status !== 401 && chat.status !== 403) {
+    // And it must be specific to /api/chat: an app that answers every path with the same status
+    // (a 500 error page, an SPA fallback serving index.html with 200) proves nothing about it.
+    const answered = chat.status >= 200 && chat.status !== 404 && chat.status !== 401 && chat.status !== 403;
+    const control = answered
+      ? await call(`/api/vibeaudit-no-such-route-${randomBytes(4).toString("hex")}`, { method: "POST", headers: ["Content-Type: application/json"], data: '{"message":"ping"}' })
+      : null;
+    // Different status, or a JSON answer where unknown routes get HTML (an all-methods fallback
+    // with a chat route that swallows the upstream error into 200 {"error": ...}).
+    const specific = !!control && (control.status !== chat.status || (looksJson(chat.body) && !looksJson(control.body)));
+    if (answered && specific) {
       findings.push(mkFinding("f-chat", "high", "missing_auth", "AI proxy endpoint has no authentication or rate limit",
         "POST /api/chat forwards to a paid upstream API without requiring any auth, so anyone can run up the bill against the server's key.", true,
         [{ kind: "http", method: "POST", url: "/api/chat", status: chat.status, bodyExcerpt: chat.body.slice(0, 200) }], "probe"));
@@ -820,7 +836,8 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
   await safe("cors", async () => {
     const root = await call("/api/users");
     const acao = /^access-control-allow-origin:\s*(.+)$/im.exec(root.headers);
-    if (acao && acao[1]!.trim() === "*") {
+    // json(): old vite preview sends ACAO * on everything, including its HTML fallback.
+    if (acao && acao[1]!.trim() === "*" && json(root.body)) {
       findings.push(mkFinding("f-cors", "medium", "unsafe_defaults", "Wildcard CORS policy",
         "Responses send Access-Control-Allow-Origin: *, letting any website read the API's responses in a victim's browser.", true,
         [{ kind: "http", method: "GET", url: "/api/users", status: root.status, headers: { "access-control-allow-origin": "*" } }], "probe"));

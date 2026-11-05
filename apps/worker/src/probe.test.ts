@@ -75,6 +75,33 @@ describe("probe", () => {
     expect(findings.find((f) => f.id === "f-cors")).toBeUndefined();
   });
 
+  it("does not flag /api/chat when every path answers the same (error page on all routes, SPA fallback)", async () => {
+    const broken = await runProbe(() => ok(500, [], "<pre>Error [ERR_MODULE_NOT_FOUND]: Cannot find module dist/server/server.js</pre>"));
+    expect(broken.find((f) => f.id === "f-chat")).toBeUndefined();
+    const spa = await runProbe(() => ok(200, ["Content-Type: text/html"], `<!doctype html><script>window.process={env:{}};var password="";</script><div id=root data-x='"text"'></div>`));
+    expect(spa.find((f) => f.id === "f-chat")).toBeUndefined();
+    // An SPA fallback doesn't "prove" the GET probes either (its HTML mentions process/password).
+    for (const id of ["f-users", "f-debug", "f-idor"]) expect(spa.find((f) => f.id === id), id).toBeUndefined();
+  });
+
+  it("still catches real flaws behind fallbacks", async () => {
+    const html = ok(200, ["Content-Type: text/html", "Access-Control-Allow-Origin: *"], '<!doctype html><p class="text-success">hi</p>');
+    // Unknown POSTs 405, chat answers: flagged.
+    const m405 = await runProbe((path, method) => (method === "POST" ? (path === "/api/chat" ? ok(200, [], '{"reply":"pong"}') : ok(405, [], "")) : undefined));
+    expect(m405.some((f) => f.id === "f-chat")).toBe(true);
+    // All-methods HTML fallback; chat swallows the upstream error into 200 JSON: flagged.
+    const all = await runProbe((path) => (path === "/api/chat" ? ok(200, [], '{"error":"upstream failed"}') : html));
+    expect(all.some((f) => f.id === "f-chat")).toBe(true);
+    // ...but the fallback's HTML never proves the admin action or CORS.
+    expect(all.find((f) => f.id === "f-admin-header")).toBeUndefined();
+    expect(all.find((f) => f.id === "f-cors")).toBeUndefined();
+    // GET SPA fallback, real JSON API underneath: still flagged.
+    const api = await runProbe((path, method) =>
+      method === "GET" && path === "/api/users" ? ok(200, [], '[{"id":1,"passwordHash":"x"}]') : method === "GET" ? html : undefined,
+    );
+    expect(api.some((f) => f.id === "f-users")).toBe(true);
+  });
+
   it("does not flag /api/chat on a non-response (timeout / connection failure, http_code 000)", async () => {
     const findings = await runProbe((path, method) =>
       path === "/api/chat" && method === "POST" ? { code: 28, stdout: "\n__VA_STATUS__:000", stderr: "", timedOut: true } : undefined,

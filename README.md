@@ -182,6 +182,7 @@ The scripts default to this project's addresses and NIC names (`CP_VPC_IP`, `SBX
 ## Limitations
 
 - Only GitHub URLs are accepted; zip upload is not implemented. Runtime auditing covers Node web apps only.
+- Vite apps without a `start` script are served with `vite preview`. Full-stack Vite frameworks built for a hosting platform (TanStack Start with a Vercel preset, for example) produce no server `vite preview` can run. They start, but every page errors, so the runtime pass finds little. The probes compare against a route that can't exist, so a broken app doesn't produce false findings.
 - One audit runs at a time: the proxy has a single active-audit state, and VM 2 is sized for one. Extra audits queue.
 - The probes target the common shapes of AI-generated apps (`/api/users`, `/api/debug`, `/admin`…). A flaw on an unusual route may only show up as an LLM suspicion, or not at all. The browser pass is logged-out only.
 - The install-script scanner follows hooks into the code they run, including through shell, `npm run` chains, preloads and tool configs. A fully dynamic load (a computed `require` path, `eval` of a data file) can still hide code from it.
