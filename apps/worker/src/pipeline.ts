@@ -12,6 +12,7 @@ import {
   type Report,
   type SandboxControls,
   WORKSPACE_MOUNT,
+  CONTAINER_LIMITS,
   keyPlaceholder,
   MAX_ARCHIVE_ENTRIES,
   AUDIT_TIMEOUT_MS,
@@ -105,8 +106,8 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
   let pages: PageVisit[] | undefined;
   let controls: SandboxControls | undefined;
   let captures: PageCapture[] = [];
-  const limitHit = (st: AuditStage, detail: string) =>
-    limitHits.push({ source: "limit", at: new Date().toISOString(), stage: st, limit: "stage_timeout", detail });
+  const limitHit = (st: AuditStage, detail: string, limit: "stage_timeout" | "memory" = "stage_timeout") =>
+    limitHits.push({ source: "limit", at: new Date().toISOString(), stage: st, limit, detail });
 
   // Whole-audit cap. When it runs out: record it, kill the audit's containers (any in-flight
   // `docker run` returns), and fail the audit with what it found so far. The pipeline below may
@@ -307,7 +308,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           role: "app",
           image,
           cmd: ["bash", "-lc", `cd ${WORKSPACE_MOUNT}/app && ${plan.buildCommand}`],
-          env: sandboxEnv(plan, canaries, id, testKeys, true),
+          // Node caps its heap well below the container's memory cap, and large Next.js builds hit
+          // that first ("JavaScript heap out of memory"). Give the build most of the container.
+          env: { ...sandboxEnv(plan, canaries, id, testKeys, true), NODE_OPTIONS: `--max-old-space-size=${BUILD_HEAP_MB}` },
           timeoutMs: STAGE_TIMEOUTS_MS.buildPerTry,
           name: `va-${id}-build`,
         });
@@ -315,8 +318,15 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         if (build.timedOut) limitHit("build", `build exceeded ${STAGE_TIMEOUTS_MS.buildPerTry / 1000}s and was killed`);
         if (build.code !== 0) {
           staticOnly = true;
-          staticReason = build.timedOut ? "build timed out" : withEnvHint("the build failed", `${build.stdout}
-${build.stderr}`);
+          const buildLog = `${build.stdout}\n${build.stderr}`;
+          // 137 = SIGKILL: past the container's own memory cap the kernel kills it without a word.
+          const oom = !build.timedOut && (build.code === 137 || outOfMemory(buildLog));
+          if (oom) limitHit("build", "the build ran out of memory (JavaScript heap) and stopped", "memory");
+          staticReason = build.timedOut
+            ? "build timed out"
+            : oom
+              ? `the build ran out of memory (it needed more than the ${Math.round(CONTAINER_LIMITS.memoryBytes.app / 1024 ** 3)} GB the sandbox allows)`
+              : withEnvHint("the build failed", buildLog);
         }
         else await scanBundle(sandbox, image, id, plan.framework, sql, findings, repoHits, plantedEnv(plan, canaries, id, testKeys));
       }
@@ -908,6 +918,13 @@ export function scoreFrom(findings: Finding[]): number {
   const malicious = findings.some((f) => f.category === "supply_chain" && f.severity === "critical");
   return malicious ? Math.min(score, MALICIOUS_SCORE_CAP) : score;
 }
+
+/** V8 (or the kernel) stopping a build for memory. The log is untrusted: this only picks a fixed message. */
+export function outOfMemory(log: string): boolean {
+  return /JavaScript heap out of memory|FATAL ERROR: (?:Reached heap limit|Ineffective mark-compacts)|\bOOMKilled\b/.test(log.slice(-200_000));
+}
+/** Heap for build-stage Node: most of the app container's memory, leaving room for native memory and the rest. */
+const BUILD_HEAP_MB = Math.floor((CONTAINER_LIMITS.memoryBytes.app / 1024 ** 2) * 0.75);
 
 /** A failure reason, plus which env var the log blames when it says so (names only, never log text). */
 function withEnvHint(reason: string, log: string): string {

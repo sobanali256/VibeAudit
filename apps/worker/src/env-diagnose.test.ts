@@ -41,3 +41,12 @@ describe("diagnoseEnvFailure (review fixes)", () => {
     expect(Date.now() - t0).toBeLessThan(1000);
   });
 });
+
+describe("outOfMemory", () => {
+  it("spots V8 and kernel memory kills, not ordinary failures", async () => {
+    const { outOfMemory } = await import("./pipeline");
+    expect(outOfMemory("FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory")).toBe(true);
+    expect(outOfMemory("FATAL ERROR: Reached heap limit Allocation failed")).toBe(true);
+    expect(outOfMemory("Type error: Property 'x' does not exist")).toBe(false);
+  });
+});
