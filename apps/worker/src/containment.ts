@@ -63,6 +63,12 @@ export async function proxyLogOffset(path = PROXY_EVENTS_PATH): Promise<number> 
   }
 }
 
+/**
+ * Planted canaries are fakes, but a report that prints one whole looks like a leaked key (and
+ * could be replayed into a later audit's proxy log). Keep the recognisable prefix only.
+ */
+export const maskCanaries = (s: string | undefined) => (s === undefined ? undefined : s.replace(/AKIAVIBE[0-9A-F]{4,}/gi, "AKIAVIBE…"));
+
 const cap = (s: string | undefined, n: number) => (s === undefined ? undefined : s.length > n ? `${s.slice(0, n)}…` : s);
 
 interface ProxyRead {
@@ -137,7 +143,7 @@ export async function readProxyEvents(opts: {
       // dynamic/report); the proxy's label is only a fallback, and only if it's a real stage.
       const tagged = AuditStage.safeParse(ev.stage);
       const stage = stageAt(opts.marks, ms) ?? (tagged.success ? tagged.data : null);
-      const host = cap(ev.host, 253);
+      const host = maskCanaries(cap(ev.host, 253));
       const at = new Date(ms).toISOString();
       const entry: ProxyEntry = {
         source: "proxy",
@@ -146,7 +152,7 @@ export async function readProxyEvents(opts: {
         verdict: ev.kind,
         method: cap(ev.method, 16),
         host: host && ev.port && ev.port !== 443 && ev.port !== 80 ? `${host}:${ev.port}` : host,
-        path: cap(ev.path, 300),
+        path: maskCanaries(cap(ev.path, 300)),
         reason: cap(ev.reason, 200),
         keyVar: cap(ev.var, 64),
       };

@@ -88,6 +88,16 @@ describe("readProxyEvents", () => {
     expect(none.entries).toEqual([]);
   });
 
+  it("masks planted canaries in the stored path, host and exfil finding", async () => {
+    const path = join(dir, "canary.jsonl");
+    await writeFile(path, line({ ts: ts(T0 + 1), auditId: "me", stage: "install", kind: "exfil", method: "GET", host: "registry.npmjs.org", path: "/-/v1/search?text=AKIAVIBE3011B7CB8F5D10DCA8", reason: "canary secret in outbound request" }));
+    const r = await readProxyEvents({ auditId: "me", offset: 0, windowStartMs: T0, windowEndMs: T0 + 1e6, marks, path });
+    const json = JSON.stringify(r);
+    expect(json).not.toContain("3011B7CB8F5D");
+    expect(json).toContain("text=AKIAVIBE…");
+    expect(r.findings).toHaveLength(1);
+  });
+
   it("caps untrusted strings", async () => {
     const path = join(dir, "long.jsonl");
     await writeFile(path, line({ ts: ts(T0 + 1), auditId: "me", stage: "run", kind: "blocked", host: "h.example", path: "/" + "a".repeat(2000), reason: "r".repeat(1000) }));
