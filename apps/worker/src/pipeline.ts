@@ -313,6 +313,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           env: { ...sandboxEnv(plan, canaries, id, testKeys, true), NODE_OPTIONS: `--max-old-space-size=${BUILD_HEAP_MB}` },
           timeoutMs: STAGE_TIMEOUTS_MS.buildPerTry,
           name: `va-${id}-build`,
+          build: true,
         });
         await ev(sql, id, "log", { stage: "build", msg: tailLog(build) });
         if (build.timedOut) limitHit("build", `build exceeded ${STAGE_TIMEOUTS_MS.buildPerTry / 1000}s and was killed`);
@@ -328,14 +329,14 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
             limitHit(
               "build",
               killed
-                ? `the build was killed at the container's ${Math.round(CONTAINER_LIMITS.memoryBytes.app / 1024 ** 3)} GB memory cap`
+                ? `the build was killed at the container's ${Math.round(CONTAINER_LIMITS.buildMemoryBytes / 1024 ** 3)} GB memory cap`
                 : "the build ran out of memory (JavaScript heap) and stopped",
               "memory",
             );
           staticReason = build.timedOut
             ? "build timed out"
             : oom
-              ? `the build ran out of memory (it needed more than the ${Math.round(CONTAINER_LIMITS.memoryBytes.app / 1024 ** 3)} GB the sandbox allows)`
+              ? `the build ran out of memory (it needed more than the ${Math.round(CONTAINER_LIMITS.buildMemoryBytes / 1024 ** 3)} GB the sandbox allows)`
               : withEnvHint("the build failed", buildLog);
         }
         else await scanBundle(sandbox, image, id, plan.framework, sql, findings, repoHits, plantedEnv(plan, canaries, id, testKeys));
@@ -936,8 +937,8 @@ export function outOfMemory(log: string): boolean {
     log.slice(-200_000),
   );
 }
-/** Heap for build-stage Node: most of the app container's memory, leaving room for native memory and the rest. */
-const BUILD_HEAP_MB = Math.floor((CONTAINER_LIMITS.memoryBytes.app / 1024 ** 2) * 0.6);
+/** Heap for build-stage Node: most of the build container's memory, leaving room for native memory (Turbopack, workers). */
+const BUILD_HEAP_MB = Math.floor((CONTAINER_LIMITS.buildMemoryBytes / 1024 ** 2) * 0.7);
 
 /** A failure reason, plus which env var the log blames when it says so (names only, never log text). */
 function withEnvHint(reason: string, log: string): string {

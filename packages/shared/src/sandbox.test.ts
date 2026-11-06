@@ -186,3 +186,17 @@ describe("fake host pins", () => {
     expect(browser.some((a) => a.includes("vibeaudit-placeholder"))).toBe(false);
   });
 });
+
+describe("build memory profile", () => {
+  it("gives only the app container's build step the larger cap", async () => {
+    const { containerArgs, CONTAINER_LIMITS } = await import("./sandbox");
+    const base = { auditId: "abcdefghij0123456789", network: "va-x", proxyUrl: "http://10.1.96.4:8080" };
+    const build = containerArgs({ ...base, role: "app", workspaceHostPath: "/srv/vibeaudit/ws/x", build: true });
+    expect(build).toContain(`--memory=${CONTAINER_LIMITS.buildMemoryBytes}`);
+    expect(build).toContain(`--memory-swap=${CONTAINER_LIMITS.buildMemoryBytes}`);
+    const app = containerArgs({ ...base, role: "app", workspaceHostPath: "/srv/vibeaudit/ws/x" });
+    expect(app).toContain(`--memory=${CONTAINER_LIMITS.memoryBytes.app}`);
+    expect(() => containerArgs({ ...base, role: "browser", build: true })).toThrow();
+    expect(CONTAINER_LIMITS.buildMemoryBytes).toBeLessThanOrEqual(5 * 1024 ** 3); // VM 2 has 8 GB; the host keeps the rest
+  });
+});

@@ -80,6 +80,8 @@ export interface RunSpec {
   /** stdout/stderr cap for this run (default 256 KB, ceiling 8 MB). */
   maxOutput?: number;
   /** read-only stages (install/build) run GET/HEAD-only; this just tags the proxy stage. */
+  /** The build step: the larger build memory cap (app role only). */
+  build?: boolean;
 }
 
 export class Sandbox {
@@ -141,6 +143,7 @@ export class Sandbox {
         workspaceHostPath: spec.role === "app" ? this.workspaceHostPath : undefined,
         hosts: spec.hosts,
         name,
+        build: spec.build,
       }),
     ];
     for (const [k, v] of Object.entries(spec.env ?? {})) args.push(`--env=${k}=${v}`);

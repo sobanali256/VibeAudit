@@ -130,11 +130,14 @@ export type ContainerRole = "app" | "browser";
  * - memory: the rootfs overlay is memory-backed, so rootfs writes count here too. Package
  *   caches are pointed at the workspace volume to keep them out of it.
  * - cpus: < 2 so dockerd/sshd (the worker's control channel) always get CPU.
+ * - buildMemoryBytes: the build step alone (nothing else runs on VM 2 then). Real Next.js builds
+ *   type-check large dependency typings and need more than the app cap; the rest stays for the host.
  */
 export const CONTAINER_LIMITS = {
   pids: 1024,
   cpus: { app: 1.5, browser: 1 },
   memoryBytes: { app: 3 * 1024 ** 3, browser: 2 * 1024 ** 3 },
+  buildMemoryBytes: 5 * 1024 ** 3,
   shmBytes: { app: 64 * 1024 ** 2, browser: 512 * 1024 ** 2 },
   /**
    * Workspace (repo + node_modules + build output). The worker must back it with a real
@@ -160,6 +163,8 @@ export interface ContainerArgsInput {
   /** Extra name -> IP pins (Docker's embedded DNS doesn't answer under runsc). */
   hosts?: Record<string, string>;
   name?: string;
+  /** The build step's larger memory cap (app role only; see CONTAINER_LIMITS.buildMemoryBytes). */
+  build?: boolean;
 }
 
 /**
@@ -170,7 +175,8 @@ export interface ContainerArgsInput {
 export function containerArgs(i: ContainerArgsInput): string[] {
   if (!AUDIT_ID_RE.test(i.auditId)) throw new Error("invalid audit id");
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/.test(i.network)) throw new Error("invalid network name");
-  const mem = CONTAINER_LIMITS.memoryBytes[i.role];
+  if (i.build && i.role !== "app") throw new Error("only the app container builds");
+  const mem = i.build ? CONTAINER_LIMITS.buildMemoryBytes : CONTAINER_LIMITS.memoryBytes[i.role];
   const args = [
     "--runtime=runsc",
     "--cap-drop=ALL",
