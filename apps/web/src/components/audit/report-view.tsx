@@ -273,7 +273,7 @@ function TabBar({
     <div
       role="tablist"
       aria-label="Report sections"
-      className="-mx-4 flex gap-1 overflow-x-auto border-b border-zinc-200 px-4 sm:mx-0 sm:px-0 dark:border-zinc-800"
+      className="-mx-4 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-zinc-200 px-4 sm:mx-0 sm:px-0 dark:border-zinc-800"
       onKeyDown={(e) => {
         const i = tabs.findIndex((t) => t.id === current);
         if (e.key === "ArrowRight") go(i + 1);
@@ -653,6 +653,23 @@ function EvidenceBlock({ e, auditId }: { e: Evidence; auditId: string }) {
             <span className="text-zinc-500">{e.method}</span> {e.url} <span className="text-zinc-500">→</span>{" "}
             <span className={e.status < 400 ? "text-red-700 dark:text-red-400" : ""}>{e.status}</span>
           </div>
+          {e.request?.headers?.length || e.request?.body ? (
+            <div className="mb-1 text-zinc-500">
+              {e.request.headers?.map((h, i) => (
+                <div key={i} className="break-all">
+                  sent {h}
+                </div>
+              ))}
+              {e.request.body ? <div className="break-all">sent body {e.request.body}</div> : null}
+            </div>
+          ) : null}
+          {e.headers
+            ? Object.entries(e.headers).map(([k, v]) => (
+                <div key={k} className="break-all text-zinc-600 dark:text-zinc-400">
+                  {k}: {v}
+                </div>
+              ))
+            : null}
           {e.bodyExcerpt ? <pre className="whitespace-pre-wrap break-all text-zinc-600 dark:text-zinc-400">{e.bodyExcerpt}</pre> : null}
         </div>
       );
