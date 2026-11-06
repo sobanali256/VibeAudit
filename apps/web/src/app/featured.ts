@@ -11,7 +11,7 @@ export interface Featured {
 
 export const FEATURED: Featured[] = [
   {
-    id: "fqmulbkktfudgk7nhadn",
+    id: "rmrzni2qqpflmgvosg34",
     repo: "sobanali256/demo-vulnerable",
     blurb: "A notes app with every classic AI-generated hole, most of them proven by attacking the running app.",
   },
