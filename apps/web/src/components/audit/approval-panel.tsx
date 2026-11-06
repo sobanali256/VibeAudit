@@ -1,6 +1,6 @@
 "use client";
 
-import type { ApprovalRequest } from "@vibeaudit/shared";
+import { type ApprovalRequest, fakeEnvValue } from "@vibeaudit/shared";
 import { useEffect, useState } from "react";
 
 type Decision = "approve" | "static_only" | "cancel";
@@ -108,6 +108,7 @@ export function ApprovalPanel({ auditId, request }: { auditId: string; request: 
               <li key={e.name} className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-mono text-xs">{e.name}</span>
                 <span className="text-xs text-zinc-500">{ENV_LABEL[e.provide]}</span>
+                {e.provide === "fake" ? <code className="font-mono text-xs break-all text-zinc-600 dark:text-zinc-400">{fakeEnvValue(e.name)}</code> : null}
               </li>
             ))}
           </ul>
@@ -188,6 +189,7 @@ export function ApprovalPanel({ auditId, request }: { auditId: string; request: 
 const ENV_LABEL = {
   canary: "gets a canary value (any leak during install is flagged)",
   placeholder: "test key slot (a canary if you leave it empty)",
+  fake: "gets a fake value of the right shape (points nowhere real)",
   empty: "left empty",
 } as const;
 

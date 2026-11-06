@@ -1,4 +1,4 @@
-import { ENV_VAR_RE, KEY_PROVIDERS } from "@vibeaudit/shared";
+import { ENV_VAR_RE, KEY_PROVIDERS, fakeEnvValue } from "@vibeaudit/shared";
 import { canaryWorthy } from "./secrets";
 
 /**
@@ -30,7 +30,7 @@ export interface Plan {
   startCommand: string | null;
   port: number | null;
   /** Env var names the app reads, with how the sandbox should provide each. */
-  env: { name: string; provide: "canary" | "placeholder" | "empty" }[];
+  env: { name: string; provide: "canary" | "placeholder" | "fake" | "empty" }[];
 }
 
 const asRecord = (v: unknown): Record<string, string> =>
@@ -95,9 +95,10 @@ function detectEnv(
   if (deps["@google/generative-ai"] || deps["@google/genai"]) names.add("GEMINI_API_KEY");
   return [...names].map((name) => ({
     name,
-    // Offer a real test key only for providers we know the host for; otherwise a canary stub
-    // (or nothing, for config that isn't a secret).
-    provide: Object.hasOwn(KEY_PROVIDERS, name) ? "placeholder" : canaryWorthy(name) ? "canary" : "empty",
+    // Offer a real test key only for providers we know the host for; otherwise a canary stub,
+    // or for config that isn't a secret, a well-formed fake (a URL, a host...) when the name
+    // has a clear shape, else nothing.
+    provide: Object.hasOwn(KEY_PROVIDERS, name) ? "placeholder" : canaryWorthy(name) ? "canary" : fakeEnvValue(name) !== null ? "fake" : "empty",
   }));
 }
 

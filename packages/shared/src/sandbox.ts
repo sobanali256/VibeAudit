@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AUDIT_LABEL, AuditStage } from "./audit";
+import { FAKE_HOSTS } from "./env-fakes";
 import {
   AUDIT_ID_RE,
   ENV_VAR_RE,
@@ -212,6 +213,9 @@ export function containerArgs(i: ContainerArgsInput): string[] {
     args.push(`--add-host=${name}:${ip}`);
   }
   if (i.role === "app") {
+    // Fake env values point at these (env-fakes.ts): pinned to loopback, a connection fails at
+    // once in the container, with no DNS lookup and nothing for the firewall to log.
+    for (const h of FAKE_HOSTS) args.push(`--add-host=${h}:127.0.0.1`);
     if (!i.workspaceHostPath) throw new Error("app containers need a workspace");
     args.push(
       `--volume=${i.workspaceHostPath}:${WORKSPACE_MOUNT}`,

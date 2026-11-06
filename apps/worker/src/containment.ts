@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { rename, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { AuditStage, type ContainmentEntry, type Finding, KEY_PROVIDERS, ProxyEvent } from "@vibeaudit/shared";
+import { AuditStage, type ContainmentEntry, FAKE_HOSTS, type Finding, KEY_PROVIDERS, ProxyEvent } from "@vibeaudit/shared";
 
 /**
  * Containment log: every time the sandbox reached for the network (and a control let it
@@ -352,6 +352,14 @@ const PROVIDER_HOSTS = new Set(Object.values(KEY_PROVIDERS).flat());
  */
 const isOwnApiAtBuild = (e: ProxyEntry) => e.stage === "build" && PROVIDER_HOSTS.has(stripPort(e.host ?? "")) && !isEvasiveBlock(e);
 
+/**
+ * A request to one of the sandbox's own fake config hosts (a fake SUPABASE_URL the build tried
+ * to prerender against): the app doing its job with a value we gave it. It stays in the log but
+ * isn't install-time code reaching out. Exact hosts only, never a wildcard.
+ */
+const FAKE_HOST_SET = new Set<string>(FAKE_HOSTS);
+const isOwnFakeHost = (e: ProxyEntry) => FAKE_HOST_SET.has(stripPort(e.host ?? ""));
+
 /** A block that isn't just "a GET to a host off the allowlist": raw socket, IP literal, odd port, a body, an upgrade... */
 export function isEvasiveBlock(e: { reason?: string; method?: string }): boolean {
   if (!PLAIN_HOST_BLOCK.test(e.reason ?? "")) return true;
@@ -387,7 +395,7 @@ export function egressFindings(entries: readonly ContainmentEntry[]): Finding[] 
   for (const e of entries) {
     if (!e.stage || !SUPPLY_CHAIN_STAGES.has(e.stage)) continue;
     if (e.source === "firewall") fw.push(e);
-    else if (e.source === "proxy" && e.verdict === "blocked" && !/^no active audit/.test(e.reason ?? "") && !isOwnApiAtBuild(e)) {
+    else if (e.source === "proxy" && e.verdict === "blocked" && !/^no active audit/.test(e.reason ?? "") && !isOwnApiAtBuild(e) && !isOwnFakeHost(e)) {
       pxStages.push(e);
       if (!e.host && !e.method && OVERFLOW_ROW.test(e.reason ?? "")) overflow += e.repeat ?? 0;
       else px.push(e);

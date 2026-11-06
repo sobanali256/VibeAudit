@@ -174,3 +174,15 @@ describe("containerArgs", () => {
     expect(CONTAINER_LIMITS.cpus.browser).toBeLessThan(2);
   });
 });
+
+describe("fake host pins", () => {
+  it("maps every fake host to loopback in app containers only", async () => {
+    const { containerArgs } = await import("./sandbox");
+    const { FAKE_HOSTS } = await import("./env-fakes");
+    const base = { auditId: "abcdefghij0123456789", network: "va-x", proxyUrl: "http://10.1.96.4:8080" };
+    const app = containerArgs({ ...base, role: "app", workspaceHostPath: "/srv/vibeaudit/ws/x" });
+    for (const h of FAKE_HOSTS) expect(app).toContain(`--add-host=${h}:127.0.0.1`);
+    const browser = containerArgs({ ...base, role: "browser" });
+    expect(browser.some((a) => a.includes("vibeaudit-placeholder"))).toBe(false);
+  });
+});

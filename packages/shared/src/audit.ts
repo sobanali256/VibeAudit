@@ -100,7 +100,7 @@ export const ApprovalRequest = z.object({
     z
       .object({
         name: z.string().regex(ENV_VAR_RE),
-        provide: z.enum(["canary", "placeholder", "empty"]),
+        provide: z.enum(["canary", "placeholder", "fake", "empty"]),
       })
       .refine((e) => e.provide !== "placeholder" || Object.hasOwn(KEY_PROVIDERS, e.name), {
         message: "placeholder only for known key providers",

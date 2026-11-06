@@ -6,6 +6,7 @@ import {
   type Finding,
   ENV_VAR_RE,
   KEY_PROVIDERS,
+  fakeEnvValue,
   type PageVisit,
   type ProxyState,
   type Report,
@@ -37,6 +38,7 @@ import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { parseInspectControls } from "./controls";
 import { corroborate } from "./corroborate";
+import { describeEnvNeed, diagnoseEnvFailure } from "./env-diagnose";
 import { clearProxyState, writeProxyState } from "./proxy-state";
 import { type PageCapture, browse, worthKeeping } from "./browse";
 import { verdictLine, verifyPages, visionCandidates, visionFindings } from "./vision";
@@ -311,7 +313,11 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         });
         await ev(sql, id, "log", { stage: "build", msg: tailLog(build) });
         if (build.timedOut) limitHit("build", `build exceeded ${STAGE_TIMEOUTS_MS.buildPerTry / 1000}s and was killed`);
-        if (build.code !== 0) { staticOnly = true; staticReason = build.timedOut ? "build timed out" : "build failed"; }
+        if (build.code !== 0) {
+          staticOnly = true;
+          staticReason = build.timedOut ? "build timed out" : withEnvHint("the build failed", `${build.stdout}
+${build.stderr}`);
+        }
         else await scanBundle(sandbox, image, id, plan.framework, sql, findings, repoHits, plantedEnv(plan, canaries, id, testKeys));
       }
 
@@ -335,8 +341,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         if (!ip) {
           if (Date.now() >= runDeadline) limitHit("run", `the app didn't start listening within ${STAGE_TIMEOUTS_MS.run / 1000}s`);
           staticOnly = true;
-          staticReason = "the app did not start listening";
-          await ev(sql, id, "log", { stage: "run", msg: tailLog({ stdout: await sandbox.logs(appName), stderr: "" }) });
+          const appLog = await sandbox.logs(appName, 400).catch(() => "");
+          staticReason = withEnvHint("the app did not start listening", appLog);
+          await ev(sql, id, "log", { stage: "run", msg: tailLog({ stdout: appLog, stderr: "" }) });
         } else {
           await enter("dynamic");
           // Cap dynamic probing by the remaining run budget; whatever we have is still reported.
@@ -686,6 +693,12 @@ function sandboxEnv(plan: Plan, canaries: Record<string, string>, id: string, te
   // Opt well-known tools out of telemetry: their phone-home calls would otherwise show up as
   // blocked install/build egress (a supply-chain finding) on every Next.js or Prisma repo.
   const env: Record<string, string> = { ...canaries, ...TELEMETRY_OPT_OUT };
+  // Config with a clear shape gets a well-formed fake (a .invalid URL...) so build-time
+  // validation passes; nothing secret, and the proxy blocks anything that dials it.
+  for (const e of plan.env) {
+    const fake = e.provide === "fake" && !isReservedEnv(e.name) ? fakeEnvValue(e.name) : null;
+    if (fake !== null && !(e.name in env)) env[e.name] = fake;
+  }
   if (includeKeys) {
     for (const e of plan.env) {
       // Only hand the app a placeholder when a real test key backs it; otherwise the proxy
@@ -896,6 +909,12 @@ export function scoreFrom(findings: Finding[]): number {
   return malicious ? Math.min(score, MALICIOUS_SCORE_CAP) : score;
 }
 
+/** A failure reason, plus which env var the log blames when it says so (names only, never log text). */
+function withEnvHint(reason: string, log: string): string {
+  const d = diagnoseEnvFailure(log);
+  return d ? `${reason}: ${describeEnvNeed(d)}` : reason;
+}
+
 function tailLog(r: { stdout: string; stderr: string }): string {
   // Build output can print env values or keys: mask before it goes to the live event stream.
   // Mask a wider tail than we keep: a 2000-char window that starts mid-key would lose the prefix
@@ -939,6 +958,9 @@ function plantedEnv(plan: Plan, canaries: Record<string, string>, id: string, te
   // The generic canary is a tripwire for env dumps, not an app setting: a bundler that inlines
   // the whole env is still caught through the named secrets it inlines along with it.
   delete env[GENERIC_CANARY];
+  // Fakes are shared constants, not per-audit markers: a fake turning up in the bundle can't be
+  // traced to one variable (or tell a secret from public config), so they're not leak markers.
+  for (const e of plan.env) if (e.provide === "fake") delete env[e.name];
   return env;
 }
 
