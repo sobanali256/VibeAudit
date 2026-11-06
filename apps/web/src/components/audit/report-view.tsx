@@ -273,7 +273,7 @@ function TabBar({
     <div
       role="tablist"
       aria-label="Report sections"
-      className="-mx-4 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-zinc-200 px-4 sm:mx-0 sm:px-0 dark:border-zinc-800"
+      className="-mx-4 flex gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden border-b border-zinc-200 px-4 sm:mx-0 sm:px-0 dark:border-zinc-800"
       onKeyDown={(e) => {
         const i = tabs.findIndex((t) => t.id === current);
         if (e.key === "ArrowRight") go(i + 1);

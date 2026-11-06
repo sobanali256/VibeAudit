@@ -103,7 +103,7 @@ export function AuditLive({ initial }: { initial: AuditView }) {
     <div className="flex flex-col gap-8">
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="font-mono text-2xl font-semibold tracking-tight break-all">{title}</h1>
+          <h1 className="font-mono text-2xl font-semibold tracking-tight [overflow-wrap:anywhere]">{title}</h1>
           <StatusBadge status={view.status} />
         </div>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
