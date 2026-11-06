@@ -367,8 +367,8 @@ function Overview({
                   className="flex w-full flex-wrap items-center gap-2 px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-900"
                 >
                   <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[f.severity]}`}>{f.severity}</span>
-                  <span className="min-w-0 flex-1 font-medium break-words">{f.title}</span>
-                  <span className={`text-xs ${proofOf(f) === "runtime" ? "text-emerald-700 dark:text-emerald-400" : "text-zinc-500"}`}>
+                  <span className="min-w-[10rem] flex-1 font-medium break-words">{f.title}</span>
+                  <span className={`w-full text-xs sm:w-auto ${proofOf(f) === "runtime" ? "text-emerald-700 dark:text-emerald-400" : "text-zinc-500"}`}>
                     {PROOF_LABEL[proofOf(f)]}
                   </span>
                   <span aria-hidden className="text-zinc-400">
@@ -593,8 +593,8 @@ function FindingCard({ f, auditId, defaultOpen = false }: { f: Finding; auditId:
           ▶
         </span>
         <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[f.severity]}`}>{f.severity}</span>
-        <h4 className="min-w-0 flex-1 font-medium break-words">{f.title}</h4>
-        <span className="flex flex-wrap gap-2 text-xs text-zinc-500">
+        <h4 className="min-w-[10rem] flex-1 font-medium break-words">{f.title}</h4>
+        <span className="flex w-full flex-wrap gap-x-2 gap-y-0.5 pl-5 text-xs text-zinc-500 sm:w-auto sm:pl-0">
           <span>{CATEGORY[f.category]}</span>
           <span aria-hidden>·</span>
           <span className={f.confirmed ? "text-emerald-700 dark:text-emerald-400" : ""}>{PROOF_LABEL[proof]}</span>
@@ -801,7 +801,25 @@ function Containment({ entries, controls }: { entries: ContainmentEntry[]; contr
           </div>
 
           {flagged.length ? (
-            <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <>
+            {/* Phones: one card per attempt instead of a five-column table. */}
+            <ul className="flex flex-col gap-2 sm:hidden">
+              {flagged.map((e, i) => {
+                const a = describeAttempt(e);
+                if (!a) return null;
+                return (
+                  <li key={i} className="flex flex-col gap-1 rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-800">
+                    <span className={`text-sm ${a.tone === "red" ? "font-semibold text-red-700 dark:text-red-400" : "font-medium"}`}>{a.attempt}</span>
+                    <span className="text-emerald-700 dark:text-emerald-400">✓ Stopped by {a.control}</span>
+                    <span className="font-mono break-all text-zinc-600 dark:text-zinc-400">{a.evidence}</span>
+                    <span className="font-mono text-zinc-500">
+                      {e.stage ?? "-"} · <LocalTime iso={e.at} />
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="hidden overflow-x-auto rounded-lg border border-zinc-200 sm:block dark:border-zinc-800">
               <table className="w-full text-left text-xs">
                 <thead className="bg-zinc-50 text-zinc-500 dark:bg-zinc-900">
                   <tr>
@@ -829,6 +847,7 @@ function Containment({ entries, controls }: { entries: ContainmentEntry[]; contr
                 </tbody>
               </table>
             </div>
+            </>
           ) : (
             <p className="text-sm text-zinc-600 dark:text-zinc-400">Nothing was blocked: every request went to an allowed host.</p>
           )}
