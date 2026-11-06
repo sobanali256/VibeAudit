@@ -92,6 +92,11 @@ export function ApprovalPanel({ auditId, request }: { auditId: string; request: 
             <input type="checkbox" checked={ignoreScripts} onChange={(e) => setIgnoreScripts(e.target.checked)} />
             Install with scripts disabled (<span className="font-mono">--ignore-scripts</span>)
           </label>
+          <p className="text-xs text-zinc-600 dark:text-zinc-400">
+            {ignoreScripts
+              ? "The hooks are still read and flagged, but they won't run, so the containment log won't show what they try. Untick to let them run inside the sandbox and watch each attempt get stopped."
+              : "The hooks will run inside the sandbox. Every connection they try is logged with the control that stopped it."}
+          </p>
         </div>
       ) : null}
 

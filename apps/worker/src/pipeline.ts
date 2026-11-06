@@ -9,6 +9,7 @@ import {
   type PageVisit,
   type ProxyState,
   type Report,
+  type SandboxControls,
   WORKSPACE_MOUNT,
   keyPlaceholder,
   MAX_ARCHIVE_ENTRIES,
@@ -34,6 +35,7 @@ import { EXAMPLE_FILE, type SecretHit, bundleLeakFindings, bundleRoots, collectB
 import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
+import { parseInspectControls } from "./controls";
 import { clearProxyState, writeProxyState } from "./proxy-state";
 import { type PageCapture, browse, worthKeeping } from "./browse";
 import { verdictLine, verifyPages, visionCandidates, visionFindings } from "./vision";
@@ -98,6 +100,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
   let containment: ContainmentEntry[] | undefined;
   // Browser pass: what the pages looked like (report) and the raw captures (for the verifier).
   let pages: PageVisit[] | undefined;
+  let controls: SandboxControls | undefined;
   let captures: PageCapture[] = [];
   const limitHit = (st: AuditStage, detail: string) =>
     limitHits.push({ source: "limit", at: new Date().toISOString(), stage: st, limit: "stage_timeout", detail });
@@ -322,6 +325,10 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           env: { ...sandboxEnv(plan, canaries, id, testKeys, true), PORT: String(plan.port ?? 3000) },
           name: `va-${id}-app`,
         });
+        // Isolation receipt: what dockerd actually applied to the app container. Best effort.
+        // A keyed slot's canary is replaced by its placeholder at run: count each value once.
+        const placeholders = plan.env.filter((e) => e.provide === "placeholder" && testKeys[e.name] && !isReservedEnv(e.name)).length;
+        controls = parseInspectControls(await sandbox.inspect(appName).catch(() => null), { canaries: Object.keys(canaries).length - placeholders, placeholders }) ?? undefined;
         const runDeadline = Date.now() + STAGE_TIMEOUTS_MS.run;
         const ip = await waitForApp(sandbox, appName, plan.port ?? 3000, runDeadline);
         if (!ip) {
@@ -394,6 +401,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       findings: findings.map(maskFinding).map(storable),
       containment,
       pages,
+      controls,
       startedAt,
       finishedAt: new Date().toISOString(),
     };
@@ -444,6 +452,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         findings: found.map(maskFinding).map(storable),
         containment,
         pages,
+        controls,
         startedAt,
         finishedAt: new Date().toISOString(),
       };

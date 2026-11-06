@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 // Client-side check is for UX only; POST /api/audits re-runs parseGitHubUrl on the server.
-export function RepoUrlForm() {
+export function RepoUrlForm({ demos = [] }: { demos?: { url: string; label: string; hint: string }[] }) {
   const router = useRouter();
   const [value, setValue] = useState("");
   const [touched, setTouched] = useState(false);
@@ -14,15 +14,15 @@ export function RepoUrlForm() {
   const parsed = value.trim() ? parseGitHubUrl(value) : null;
   const showInvalid = touched && value.trim() !== "" && !parsed;
 
-  async function submit() {
-    if (!parsed || busy) return;
+  async function submit(url = value.trim()) {
+    if (!parseGitHubUrl(url) || busy) return;
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/audits", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: value.trim() }),
+        body: JSON.stringify({ url }),
       });
       const body = (await res.json().catch(() => null)) as { id?: string; error?: string } | null;
       if (!res.ok || !body?.id) {
@@ -92,6 +92,25 @@ export function RepoUrlForm() {
           </>
         ) : null}
       </p>
+      {demos.length ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-zinc-600 dark:text-zinc-400">Or try a demo repo:</span>
+          {demos.map((d) => (
+            <button
+              key={d.url}
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setValue(d.url);
+                void submit(d.url);
+              }}
+              className="rounded-md border border-zinc-300 px-2.5 py-1 font-mono text-xs hover:border-zinc-900 disabled:opacity-40 dark:border-zinc-700 dark:hover:border-zinc-100"
+            >
+              {d.label} <span className="font-sans text-zinc-500">({d.hint})</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </form>
   );
 }

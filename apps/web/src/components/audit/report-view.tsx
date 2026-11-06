@@ -1,5 +1,6 @@
-import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, Severity } from "@vibeaudit/shared";
+import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, SandboxControls, Severity } from "@vibeaudit/shared";
 import { LocalTime } from "@/components/local-time";
+import { describeAttempt } from "./attempts";
 
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
 const SEV_STYLE: Record<Severity, string> = {
@@ -96,7 +97,7 @@ export function ReportView({ report }: { report: Report }) {
 
       {report.pages?.length ? <Pages pages={report.pages} auditId={report.auditId} /> : null}
 
-      <Containment entries={report.containment} />
+      <Containment entries={report.containment} controls={report.controls} />
 
       {report.lighthouse ? (
         <div className="flex flex-col gap-2">
@@ -268,7 +269,7 @@ function Pages({ pages, auditId }: { pages: PageVisit[]; auditId: string }) {
   );
 }
 
-function Containment({ entries }: { entries: ContainmentEntry[] }) {
+function Containment({ entries, controls }: { entries: ContainmentEntry[]; controls?: SandboxControls }) {
   const flagged: ContainmentEntry[] = [];
   const allowed: Extract<ContainmentEntry, { source: "proxy" }>[] = [];
   let exfil = 0;
@@ -295,6 +296,7 @@ function Containment({ entries }: { entries: ContainmentEntry[] }) {
   return (
     <div className="flex flex-col gap-3">
       <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Containment</h3>
+      {controls ? <ControlsReceipt c={controls} /> : null}
       {entries.length === 0 ? (
         <p className="text-sm text-zinc-600 dark:text-zinc-400">The sandbox made no network requests and hit no limits.</p>
       ) : (
@@ -319,23 +321,25 @@ function Containment({ entries }: { entries: ContainmentEntry[] }) {
                   <tr>
                     <th className="px-3 py-2 font-medium">Time</th>
                     <th className="px-3 py-2 font-medium">Stage</th>
-                    <th className="px-3 py-2 font-medium">Control</th>
-                    <th className="px-3 py-2 font-medium">Target</th>
-                    <th className="px-3 py-2 font-medium">Detail</th>
+                    <th className="px-3 py-2 font-medium">What the code tried</th>
+                    <th className="px-3 py-2 font-medium">Stopped by</th>
+                    <th className="px-3 py-2 font-medium">Evidence</th>
                   </tr>
                 </thead>
-                <tbody className="font-mono">
-                  {flagged.map((e, i) => (
-                    <tr key={i} className="border-t border-zinc-200 align-top dark:border-zinc-800">
-                      <td className="px-3 py-1.5 whitespace-nowrap text-zinc-500"><LocalTime iso={e.at} /></td>
-                      <td className="px-3 py-1.5">{e.stage ?? "-"}</td>
-                      <td className={`px-3 py-1.5 whitespace-nowrap ${e.source === "proxy" && e.verdict === "exfil" ? "font-semibold text-red-700 dark:text-red-400" : ""}`}>
-                        {eventLabel(e)}
-                      </td>
-                      <td className="px-3 py-1.5 break-all">{target(e)}</td>
-                      <td className="px-3 py-1.5 break-all">{detail(e)}</td>
-                    </tr>
-                  ))}
+                <tbody>
+                  {flagged.map((e, i) => {
+                    const a = describeAttempt(e);
+                    if (!a) return null;
+                    return (
+                      <tr key={i} className="border-t border-zinc-200 align-top dark:border-zinc-800">
+                        <td className="px-3 py-1.5 whitespace-nowrap text-zinc-500 font-mono"><LocalTime iso={e.at} /></td>
+                        <td className="px-3 py-1.5 font-mono">{e.stage ?? "-"}</td>
+                        <td className={`px-3 py-1.5 ${a.tone === "red" ? "font-semibold text-red-700 dark:text-red-400" : ""}`}>{a.attempt}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-emerald-700 dark:text-emerald-400">✓ {a.control}</td>
+                        <td className="px-3 py-1.5 font-mono break-all text-zinc-600 dark:text-zinc-400">{a.evidence}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -371,18 +375,40 @@ function Chip({ cls, children }: { cls: string; children: React.ReactNode }) {
   return <span className={`rounded px-2 py-0.5 font-medium ${cls}`}>{children}</span>;
 }
 
-function eventLabel(e: ContainmentEntry): string {
-  if (e.source === "proxy") return e.verdict === "exfil" ? "exfil blocked" : `proxy ${e.verdict}`;
-  if (e.source === "firewall") return `firewall drop (${e.direction})`;
-  return `limit: ${e.limit}`;
-}
-function target(e: ContainmentEntry): string {
-  if (e.source === "proxy") return `${e.method ?? ""} ${e.host ?? ""}${e.path ?? ""}`.trim();
-  if (e.source === "firewall") return `${e.proto} ${e.dst}${e.dport ? `:${e.dport}` : ""}`;
-  return "";
-}
-function detail(e: ContainmentEntry): string {
-  if (e.source === "proxy") return [e.reason, e.keyVar ? `key ${e.keyVar}` : null, e.repeat ? `×${e.repeat}` : null].filter(Boolean).join(" · ");
-  if (e.source === "limit") return e.detail;
-  return "";
+function ControlsReceipt({ c }: { c: SandboxControls }) {
+  const gb = (b: number) => `${(b / 1024 ** 3).toFixed(b % 1024 ** 3 ? 1 : 0)} GB`;
+  const rootUser = /^(root|0)(:|$)/.test(c.user);
+  const rows: [boolean, string, string][] = [
+    [c.runtime === "runsc", "gVisor user-space kernel", `runtime ${c.runtime}`],
+    [!rootUser, "Non-root user", `user ${c.user}`],
+    [!c.privileged && c.capDrop.includes("ALL") && c.capAdd.length === 0, "No Linux capabilities", c.privileged ? "privileged" : `drop ${c.capDrop.join(",") || "none"}${c.capAdd.length ? `, add ${c.capAdd.join(",")}` : ""}`],
+    [c.noNewPrivileges, "No privilege escalation", c.noNewPrivileges ? "no-new-privileges" : "not set"],
+    [c.pidsLimit !== null, "Process cap", c.pidsLimit !== null ? `${c.pidsLimit} pids` : "none"],
+    [c.memoryBytes > 0, "Memory cap", c.memoryBytes ? gb(c.memoryBytes) : "none"],
+    [c.cpus > 0, "CPU cap", c.cpus ? `${c.cpus} CPUs` : "none"],
+    [c.egressProxy, "All web traffic via the egress proxy", `network ${c.network}`],
+    [!c.mounts.some((m) => /docker\.sock/.test(m.destination)), "No Docker socket mounted", c.mounts.map((m) => `${m.destination} (${m.rw ? "rw" : "ro"})`).join(", ") || "no mounts"],
+  ];
+  const planted = `${c.planted.canaries} canary secret${c.planted.canaries === 1 ? "" : "s"}${c.planted.placeholders ? ` and ${c.planted.placeholders} test-key placeholder${c.planted.placeholders === 1 ? "" : "s"} (swapped for the real key by the proxy, outside the sandbox)` : ""}`;
+  return (
+    <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      <p className="mb-2 text-xs text-zinc-500">
+        Isolation the app container actually ran under, read back from the sandbox host&apos;s Docker daemon. Outside the container, VM 2&apos;s firewall drops every packet except those to the proxy on VM 1.
+      </p>
+      <ul className="grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
+        {rows.map(([ok, label, value]) => (
+          <li key={label} className="flex gap-2">
+            <span aria-hidden className={ok ? "text-emerald-600" : "text-red-600"}>{ok ? "✓" : "✗"}</span>
+            <span>
+              <span className="font-medium">{label}</span> <span className="font-mono text-zinc-500 break-all">{value}</span>
+              {ok ? null : <span className="sr-only"> (not applied)</span>}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-zinc-500">
+        Env: {planted}. By design, no real secret is ever put in a sandbox.
+      </p>
+    </div>
+  );
 }

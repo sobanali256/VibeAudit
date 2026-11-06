@@ -197,6 +197,21 @@ export class Sandbox {
     return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
   }
 
+  /**
+   * What isolation a running container actually got, straight from dockerd. Returns the raw
+   * `docker inspect` JSON object (parse it with parseInspectControls) or null.
+   */
+  async inspect(name: string): Promise<unknown> {
+    const r = await this.docker(["inspect", "--type", "container", name], { timeoutMs: 15_000 });
+    if (r.code !== 0) return null;
+    try {
+      const arr: unknown = JSON.parse(r.stdout);
+      return Array.isArray(arr) ? (arr[0] ?? null) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Refuse to start repo-facing containers once the audit was stopped or torn down. */
   private live(): void {
     if (this.aborting || this.tornDown) throw new SandboxError("the audit was stopped");
