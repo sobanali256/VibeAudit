@@ -359,6 +359,7 @@ export function maskFinding(f: Finding): Finding {
     title: m(f.title),
     description: m(f.description),
     ...(f.fix ? { fix: m(f.fix) } : {}),
+    ...(f.corroboratedBy ? { corroboratedBy: f.corroboratedBy.map((c) => ({ ...c, title: m(c.title) })) } : {}),
     evidence: f.evidence.map((e): Evidence => {
       switch (e.kind) {
         case "code":

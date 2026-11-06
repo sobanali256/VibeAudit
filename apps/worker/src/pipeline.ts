@@ -36,6 +36,7 @@ import type { LlmClient } from "./llm";
 import { openTarball, resolveRepo } from "./intake";
 import { Sandbox, SandboxError } from "./sandbox";
 import { parseInspectControls } from "./controls";
+import { corroborate } from "./corroborate";
 import { clearProxyState, writeProxyState } from "./proxy-state";
 import { type PageCapture, browse, worthKeeping } from "./browse";
 import { verdictLine, verifyPages, visionCandidates, visionFindings } from "./vision";
@@ -390,15 +391,17 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     clock.check();
     const status = staticOnly ? "static_only" : "completed";
     containment = await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, findings);
+    // One issue the review suspected and a probe proved is one finding, scored once.
+    const merged = corroborate(findings);
     const report: Report = {
       auditId: id,
       source: audit.source,
       status,
       mode: staticOnly ? "static_only" : "runtime",
       staticOnlyReason: staticReason,
-      score: scoreFrom(findings),
+      score: scoreFrom(merged),
       // Masked here, once, so no secret value from the repo or the app reaches the stored report.
-      findings: findings.map(maskFinding).map(storable),
+      findings: merged.map(maskFinding).map(storable),
       containment,
       pages,
       controls,
@@ -409,7 +412,7 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
     // write a "completed" report over the timed-out one.
     if (!clock.commit()) throw new AuditTimeout(timeoutMs);
     // Final event first: live viewers hang up once the status turns terminal.
-    await ev(sql, id, "done", { status, score: report.score, findings: findings.length });
+    await ev(sql, id, "done", { status, score: report.score, findings: merged.length });
     // The whole report (pages, containment, findings) through storable: one stray NUL or lone
     // surrogate from the app or the proxy must not make it unwritable.
     await finishAudit(sql, id, { status, report: storable(report) });
@@ -442,14 +445,15 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
       // Assembled already if the failure came after the report was built (e.g. finishAudit):
       // reuse it, since assembling again would add its findings to `findings` a second time.
       containment ??= await assembleContainment(sandbox, id, proxyOffset, windowStartMs, marks, limitHits, found);
+      const mergedFound = corroborate(found);
       partial = {
         auditId: id,
         source: audit.source,
         status: "failed",
         mode: marks.some((m) => m.stage === "install") ? "runtime" : "static_only",
         staticOnlyReason: `the audit failed: ${message.slice(0, 300)}`,
-        score: scoreFrom(found),
-        findings: found.map(maskFinding).map(storable),
+        score: scoreFrom(mergedFound),
+        findings: mergedFound.map(maskFinding).map(storable),
         containment,
         pages,
         controls,

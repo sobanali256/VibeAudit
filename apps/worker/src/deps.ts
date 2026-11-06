@@ -373,7 +373,7 @@ export async function dependencyFindings(
   };
   await Promise.all(Array.from({ length: Math.min(DETAIL_CONCURRENCY, wanted.length) }, worker));
 
-  const rows = hits.map(({ p, ids: vids }) => {
+  const perVersion = hits.map(({ p, ids: vids }) => {
     const idOnly = (id: string): Advisory => ({ id, aliases: [], summary: id, severity: isMal(id) ? "critical" : "medium", malicious: isMal(id) });
     const advs = vids
       .map((id): Advisory | null => {
@@ -384,12 +384,16 @@ export async function dependencyFindings(
       .filter((a): a is Advisory => a !== null);
     const malicious = advs.some((a) => a.malicious);
     const top = advs.reduce<Severity>((s, a) => worst(s, a.severity), "low");
-    return { p, advs, malicious, severity: malicious || p.direct ? top : down(top) };
+    // Per installed version: OSV's "fixed" depends on which line the version is on.
+    const fixTo = advs.map((a) => a.fixed).filter((x): x is string => !!x).sort(cmpVersion).at(-1);
+    return { p, advs, malicious, severity: malicious || p.direct ? top : down(top), fixTo };
   }).filter((r) => r.advs.length);
+  const rows = groupVersions(perVersion);
   rows.sort((a, b) => Number(b.malicious) - Number(a.malicious) || RANK.indexOf(b.severity) - RANK.indexOf(a.severity) || Number(b.p.direct) - Number(a.p.direct));
 
   const file = src === "installed" ? "node_modules/.package-lock.json" : src === "lockfile" ? "package-lock.json" : "node_modules";
-  const findings: Finding[] = rows.slice(0, MAX_DEP_FINDINGS).map(({ p, advs, malicious, severity }, i): Finding => {
+  const findings: Finding[] = rows.slice(0, MAX_DEP_FINDINGS).map(({ p, advs, malicious, severity, versions, fixes, transitive }, i): Finding => {
+    const at = versions.length > 1 ? `${p.name} (${versions.length} versions: ${versions.join(", ")})` : `${p.name}@${p.version}`;
     const list = advs.slice(0, 5).map((a) => `${a.id}${a.aliases.length ? ` (${a.aliases.join(", ")})` : ""}: ${a.summary}`);
     const more = advs.length > 5 ? ` · and ${advs.length - 5} more` : "";
     if (malicious) {
@@ -408,23 +412,65 @@ export async function dependencyFindings(
         source: "dep_audit",
       };
     }
-    const fixes = advs.map((a) => a.fixed).filter((x): x is string => !!x);
-    const fixTo = fixes.sort(cmpVersion).at(-1); // the highest fix covers every advisory listed
+    const howToUpdate = transitive ? " (update the package that depends on it, or add an override)" : "";
+    const fixTo = fixes[0]?.fixTo;
+    const sameFix = fixes.every((x) => x.fixTo === fixTo);
     return {
       id: `f-dep-${i + 1}`,
       severity,
       category: "vulnerable_dependency",
-      title: `${p.name}@${p.version} has ${advs.length > 1 ? `${advs.length} known vulnerabilities` : "a known vulnerability"}`,
+      title: `${at} has ${advs.length > 1 ? `${advs.length} known vulnerabilities` : "a known vulnerability"}`,
       description:
-        `${p.direct ? "A direct dependency" : "A transitive dependency (pulled in by another package)"} of this app is a version with published advisories. ` +
+        (versions.length > 1
+          ? `This app installs ${p.name} at ${versions.length} versions${p.direct ? (transitive ? " (directly and through other packages)" : "") : " (through other packages)"}, and between them they carry these published advisories: `
+          : `${p.direct ? "A direct dependency" : "A transitive dependency (pulled in by another package)"} of this app is a version with published advisories. `) +
         `${list.join(" · ")}${more}.`,
       confirmed: false,
-      evidence: [{ kind: "code", file, snippet: `${p.name}@${p.version}` }],
-      fix: fixTo
-        ? `Upgrade ${p.name} to ${fixTo} or later${p.direct ? "" : " (update the package that depends on it, or add an override)"}.`
-        : `No fixed version is listed for ${p.version}; check the advisory and consider replacing ${p.name}.`,
+      evidence: versions.map((v) => ({ kind: "code" as const, file, snippet: `${p.name}@${v}` })),
+      fix:
+        sameFix && fixTo
+          ? `Upgrade ${p.name} to ${fixTo} or later${howToUpdate}.`
+          : sameFix
+            ? `No fixed version is listed for ${versions.join(", ")}; check the advisory and consider replacing ${p.name}.`
+            : `Upgrade ${p.name}${howToUpdate}: ${fixes.map((x) => `${x.version} to ${x.fixTo ?? "(no fix listed)"}`).join(", ")}.`,
       source: "dep_audit",
     };
   });
   return { findings, vulnerable: rows.length, checked: ids.length, production: prod.length, detailsSkipped: failed, queryPartial };
+}
+
+/**
+ * One finding per package, not per installed version: a tree that carries undici at 7.24.4 and
+ * 7.25.0 is one thing to upgrade, and listing it twice doubles its weight in the report.
+ * Known-malicious versions are never folded: each is its own critical finding.
+ */
+type Grouped<R> = R & { versions: string[]; fixes: { version: string; fixTo?: string }[]; transitive: boolean };
+
+export function groupVersions<R extends { p: { name: string; version: string; direct: boolean }; advs: Advisory[]; malicious: boolean; severity: Severity; fixTo?: string }>(
+  rows: R[],
+): Grouped<R>[] {
+  const out: Grouped<R>[] = [];
+  const byName = new Map<string, Grouped<R>>();
+  for (const r of rows) {
+    const g = r.malicious ? undefined : byName.get(r.p.name);
+    if (!g) {
+      const n: Grouped<R> = { ...r, advs: [...r.advs], versions: [r.p.version], fixes: [{ version: r.p.version, fixTo: r.fixTo }], transitive: !r.p.direct };
+      if (!r.malicious) byName.set(r.p.name, n);
+      out.push(n);
+      continue;
+    }
+    if (!g.versions.includes(r.p.version)) {
+      g.versions.push(r.p.version);
+      g.fixes.push({ version: r.p.version, fixTo: r.fixTo });
+    }
+    if (!r.p.direct) g.transitive = true;
+    for (const a of r.advs) if (!g.advs.some((x) => x.id === a.id)) g.advs.push(a);
+    g.severity = worst(g.severity, r.severity);
+    if (r.p.direct && !g.p.direct) g.p = { ...g.p, direct: true };
+  }
+  for (const g of out) {
+    g.versions.sort(cmpVersion);
+    g.fixes.sort((a, b) => cmpVersion(a.version, b.version));
+  }
+  return out;
 }

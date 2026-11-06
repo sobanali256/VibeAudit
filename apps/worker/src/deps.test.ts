@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Finding } from "@vibeaudit/shared";
-import { LIST_SCRIPT, type OsvClient, dependencyFindings, parsePackageList, toAdvisory } from "./deps";
+import { LIST_SCRIPT, type OsvClient, dependencyFindings, groupVersions, parsePackageList, toAdvisory } from "./deps";
 
 async function runList(files: Record<string, string>) {
   const dir = await mkdtemp(join(tmpdir(), "va-deps-"));
@@ -366,5 +366,45 @@ describe("round-5 fixes", () => {
 
   it("whitelists the sandbox-reported source", () => {
     expect(parsePackageList(JSON.stringify({ src: "<b>x", truncated: false, pkgs: "" })).src).toBe("unknown");
+  });
+});
+
+describe("groupVersions", () => {
+  const adv = (id: string, severity: "high" | "medium" = "medium") => ({ id, aliases: [], summary: id, severity, malicious: false });
+  const row = (version: string, ids: string[], o: { direct?: boolean; malicious?: boolean; severity?: "high" | "medium" | "critical" } = {}) => ({
+    p: { name: "undici", version, direct: o.direct ?? false },
+    advs: ids.map((i) => adv(i)),
+    malicious: o.malicious ?? false,
+    severity: o.severity ?? ("medium" as const),
+  });
+
+  it("folds one package's versions into one row with the union of advisories and the worst severity", () => {
+    const out = groupVersions([row("7.25.0", ["GHSA-a", "GHSA-b"]), row("7.24.4", ["GHSA-b", "GHSA-c"], { direct: true, severity: "high" })]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.versions).toEqual(["7.24.4", "7.25.0"]);
+    expect(out[0]!.advs.map((a) => a.id)).toEqual(["GHSA-a", "GHSA-b", "GHSA-c"]);
+    expect(out[0]!.severity).toBe("high");
+    expect(out[0]!.p.direct).toBe(true);
+  });
+
+  it("never folds a malicious version into anything", () => {
+    const out = groupVersions([row("1.0.0", ["GHSA-a"]), row("1.0.1", ["MAL-1"], { malicious: true, severity: "critical" }), row("1.0.2", ["GHSA-b"])]);
+    expect(out.map((r) => r.versions)).toEqual([["1.0.0", "1.0.2"], ["1.0.1"]]);
+  });
+});
+
+describe("groupVersions fix targets", () => {
+  it("keeps each version's own fix, and marks a package that is also installed transitively", () => {
+    const mk = (version: string, fixTo: string | undefined, direct: boolean) => ({
+      p: { name: "lodash", version, direct },
+      advs: [{ id: "GHSA-x", aliases: [], summary: "x", severity: "high" as const, malicious: false }],
+      malicious: false,
+      severity: "high" as const,
+      fixTo,
+    });
+    const [g] = groupVersions([mk("5.0.0", "5.0.3", true), mk("4.17.15", "4.17.21", false)]);
+    expect(g!.fixes).toEqual([{ version: "4.17.15", fixTo: "4.17.21" }, { version: "5.0.0", fixTo: "5.0.3" }]);
+    expect(g!.p.direct).toBe(true);
+    expect(g!.transitive).toBe(true);
   });
 });

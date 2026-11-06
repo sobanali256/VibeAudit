@@ -66,6 +66,24 @@ export const Finding = z.object({
   confirmed: z.boolean(),
   evidence: z.array(Evidence).min(1),
   fix: z.string().optional(),
+  /**
+   * Other checks that independently reported the same problem and were merged into this one
+   * (e.g. the LLM code review suspected what a probe then proved). Their own findings are
+   * dropped so nothing is counted twice.
+   */
+  corroboratedBy: z
+    .array(
+      z.object({
+        source: z.enum(["llm_review"]),
+        title: z.string().max(200),
+        severity: Severity,
+        /** Where the review pointed (model output: a citation, not proof). */
+        file: z.string().max(300).optional(),
+        line: z.number().int().positive().optional(),
+      }),
+    )
+    .max(10)
+    .optional(),
   source: z.enum(["gitleaks", "secret_scan", "dep_audit", "llm_review", "probe", "vision", "proxy", "install_scan"]),
 });
 export type Finding = z.infer<typeof Finding>;

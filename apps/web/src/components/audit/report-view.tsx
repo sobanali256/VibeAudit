@@ -33,6 +33,10 @@ export function ReportView({ report }: { report: Report }) {
   );
   // Supply-chain findings that look hostile get a banner above everything else.
   const hostile = findings.filter((f) => f.category === "supply_chain" && (f.severity === "critical" || f.severity === "high"));
+  // Known-vulnerable dependency versions: listed together, below what the audit found in the app.
+  const isDep = (f: Finding) => f.source === "dep_audit" && f.category === "vulnerable_dependency";
+  const appFindings = findings.filter((f) => !isDep(f));
+  const depFindings = findings.filter(isDep);
   const counts = SEV_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length] as const).filter(([, n]) => n);
 
   return (
@@ -86,14 +90,16 @@ export function ReportView({ report }: { report: Report }) {
         </div>
       ) : null}
 
-      {findings.length ? (
+      {appFindings.length ? (
         <div className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Findings</h3>
-          {findings.map((f) => (
+          {appFindings.map((f) => (
             <FindingCard key={f.id} f={f} auditId={report.auditId} />
           ))}
         </div>
       ) : null}
+
+      {depFindings.length ? <DependencyGroup findings={depFindings} auditId={report.auditId} /> : null}
 
       {report.pages?.length ? <Pages pages={report.pages} auditId={report.auditId} /> : null}
 
@@ -134,7 +140,35 @@ function Score({ score }: { score: number }) {
   );
 }
 
+function DependencyGroup({ findings, auditId }: { findings: Finding[]; auditId: string }) {
+  const worst = SEV_ORDER.find((s) => findings.some((f) => f.severity === s))!;
+  return (
+    <details className="group rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 text-sm [&::-webkit-details-marker]:hidden">
+        <span aria-hidden className="inline-block text-zinc-500 transition-transform group-open:rotate-90">▶</span>
+        <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[worst]}`}>{worst}</span>
+        <span className="font-medium">
+          {findings.length} package{findings.length === 1 ? "" : "s"} with known vulnerabilities
+        </span>
+        <span className="text-xs text-zinc-500">
+          OSV.dev advisories for installed versions. Counted at half weight, and at most 30 points together.
+        </span>
+      </summary>
+      <div className="mt-3 flex flex-col gap-3">
+        {findings.map((f) => (
+          <FindingCard key={f.id} f={f} auditId={auditId} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+/** Checks that prove a finding by running the app, as opposed to confirming it from the code. */
+const RUNTIME_SOURCES = new Set<Finding["source"]>(["probe", "proxy", "vision"]);
+
 function FindingCard({ f, auditId }: { f: Finding; auditId: string }) {
+  // A planted marker found in the bundle the sandbox built is proof too, though its source is the scanner.
+  const runtime = f.confirmed && (RUNTIME_SOURCES.has(f.source) || f.evidence.some((e) => e.kind === "bundle"));
   return (
     <article className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
       <header className="flex flex-wrap items-center gap-2">
@@ -145,9 +179,24 @@ function FindingCard({ f, auditId }: { f: Finding; auditId: string }) {
         <span>{CATEGORY[f.category]}</span>
         <span aria-hidden>·</span>
         <span className={f.confirmed ? "text-emerald-700 dark:text-emerald-400" : ""}>
-          {f.confirmed ? "Proven at runtime" : "Static suspicion"}
+          {runtime ? "Proven at runtime" : f.confirmed ? "Confirmed in the code" : "Static suspicion"}
         </span>
+        {f.corroboratedBy?.length ? (
+          <>
+            <span aria-hidden>·</span>
+            <span className="text-violet-700 dark:text-violet-400">
+              {runtime ? "Suspected by code review, then proven" : "Also flagged by code review"}
+            </span>
+          </>
+        ) : null}
       </div>
+      {f.corroboratedBy?.length ? (
+        <p className="rounded-md bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:bg-violet-950/40 dark:text-violet-200">
+          <span className="font-medium">The LLM code review reported this independently</span>
+          {runtime ? ", before the sandbox proved it" : ""}:{" "}
+          {f.corroboratedBy.map((c) => `“${c.title}”${c.file ? ` (${c.file}${c.line ? `:${c.line}` : ""})` : ""}`).join(", ")}.
+        </p>
+      ) : null}
       <p className="text-sm leading-6 text-zinc-700 dark:text-zinc-300">{f.description}</p>
       <div className="flex flex-col gap-2">
         {f.evidence.map((e, i) => (
