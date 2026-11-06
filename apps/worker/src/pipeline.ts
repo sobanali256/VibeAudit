@@ -320,8 +320,18 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
           staticOnly = true;
           const buildLog = `${build.stdout}\n${build.stderr}`;
           // 137 = SIGKILL: past the container's own memory cap the kernel kills it without a word.
-          const oom = !build.timedOut && (build.code === 137 || outOfMemory(buildLog));
-          if (oom) limitHit("build", "the build ran out of memory (JavaScript heap) and stopped", "memory");
+          // Not when we killed it ourselves (stage timeout, or the whole-audit clock's abort).
+          const ours = build.timedOut || clock.expired;
+          const killed = !ours && build.code === 137;
+          const oom = !ours && (killed || outOfMemory(buildLog));
+          if (oom)
+            limitHit(
+              "build",
+              killed
+                ? `the build was killed at the container's ${Math.round(CONTAINER_LIMITS.memoryBytes.app / 1024 ** 3)} GB memory cap`
+                : "the build ran out of memory (JavaScript heap) and stopped",
+              "memory",
+            );
           staticReason = build.timedOut
             ? "build timed out"
             : oom
@@ -921,10 +931,13 @@ export function scoreFrom(findings: Finding[]): number {
 
 /** V8 (or the kernel) stopping a build for memory. The log is untrusted: this only picks a fixed message. */
 export function outOfMemory(log: string): boolean {
-  return /JavaScript heap out of memory|FATAL ERROR: (?:Reached heap limit|Ineffective mark-compacts)|\bOOMKilled\b/.test(log.slice(-200_000));
+  // The last one: Next.js reporting a build worker the kernel killed (memory, inside the container).
+  return /JavaScript heap out of memory|FATAL ERROR: (?:Reached heap limit|Ineffective mark-compacts)|\bOOMKilled\b|build worker exited with code: null and signal: SIGKILL/.test(
+    log.slice(-200_000),
+  );
 }
 /** Heap for build-stage Node: most of the app container's memory, leaving room for native memory and the rest. */
-const BUILD_HEAP_MB = Math.floor((CONTAINER_LIMITS.memoryBytes.app / 1024 ** 2) * 0.75);
+const BUILD_HEAP_MB = Math.floor((CONTAINER_LIMITS.memoryBytes.app / 1024 ** 2) * 0.6);
 
 /** A failure reason, plus which env var the log blames when it says so (names only, never log text). */
 function withEnvHint(reason: string, log: string): string {

@@ -47,6 +47,7 @@ describe("outOfMemory", () => {
     const { outOfMemory } = await import("./pipeline");
     expect(outOfMemory("FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory")).toBe(true);
     expect(outOfMemory("FATAL ERROR: Reached heap limit Allocation failed")).toBe(true);
+    expect(outOfMemory("Next.js build worker exited with code: null and signal: SIGKILL")).toBe(true);
     expect(outOfMemory("Type error: Property 'x' does not exist")).toBe(false);
   });
 });
