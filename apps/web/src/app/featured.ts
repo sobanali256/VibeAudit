@@ -11,12 +11,12 @@ export interface Featured {
 
 export const FEATURED: Featured[] = [
   {
-    id: "rmrzni2qqpflmgvosg34",
+    id: "dednztomddj2xfgtr5c2",
     repo: "sobanali256/demo-vulnerable",
     blurb: "A notes app with every classic AI-generated hole, most of them proven by attacking the running app.",
   },
   {
-    id: "yzbiidz2nuojh4ovxqr5",
+    id: "xgiengqylqdrxpzbxj2n",
     repo: "sobanali256/demo-malicious",
     blurb: "A harmless-looking weather app whose install script attacks the sandbox. See which control stopped each move.",
   },
