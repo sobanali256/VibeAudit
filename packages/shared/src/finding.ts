@@ -30,6 +30,10 @@ export const Evidence = z.discriminatedUnion("kind", [
     status: z.number().int(),
     headers: z.record(z.string(), z.string()).optional(),
     bodyExcerpt: z.string().optional(),
+    /** What the check sent, when it sent more than a bare request (our own values, not the app's). */
+    request: z
+      .object({ headers: z.array(z.string().max(200)).max(10).optional(), body: z.string().max(500).optional() })
+      .optional(),
   }),
   z.object({
     kind: z.literal("screenshot"),

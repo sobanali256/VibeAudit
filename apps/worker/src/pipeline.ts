@@ -807,7 +807,7 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
     if (forged.status >= 200 && forged.status < 300 && looksJson(forged.body) && /"ok"|success/i.test(forged.body)) {
       findings.push(mkFinding("f-admin-header", "critical", "missing_auth", "Admin action authorized by a client-supplied header",
         "POST /api/admin/delete-user performs a privileged action when the request sets x-user-role: admin, a value any client controls, so anyone can act as an administrator.", true,
-        [{ kind: "http", method: "POST", url: "/api/admin/delete-user", status: forged.status, bodyExcerpt: forged.body.slice(0, 200) }], "probe"));
+        [{ kind: "http", method: "POST", url: "/api/admin/delete-user", status: forged.status, bodyExcerpt: forged.body.slice(0, 200), request: { headers: ["Content-Type: application/json", "x-user-role: admin"], body: '{"id":3}' } }], "probe"));
     }
   });
 
@@ -830,7 +830,7 @@ async function probe(sandbox: Sandbox, id: string, ip: string, port: number, fin
     if (answered && specific) {
       findings.push(mkFinding("f-chat", "high", "missing_auth", "AI proxy endpoint has no authentication or rate limit",
         "POST /api/chat forwards to a paid upstream API without requiring any auth, so anyone can run up the bill against the server's key.", true,
-        [{ kind: "http", method: "POST", url: "/api/chat", status: chat.status, bodyExcerpt: chat.body.slice(0, 200) }], "probe"));
+        [{ kind: "http", method: "POST", url: "/api/chat", status: chat.status, bodyExcerpt: chat.body.slice(0, 200), request: { headers: ["Content-Type: application/json"], body: '{"message":"ping"}' } }], "probe"));
     }
   });
 

@@ -2,6 +2,7 @@ import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, SandboxCon
 import { LocalTime } from "@/components/local-time";
 import { describeAttempt } from "./attempts";
 import { Replay } from "./replay";
+import { AttackConsole } from "./attack-console";
 
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
 const SEV_STYLE: Record<Severity, string> = {
@@ -90,6 +91,8 @@ export function ReportView({ report }: { report: Report }) {
           </ul>
         </div>
       ) : null}
+
+      <AttackConsole report={report} />
 
       {appFindings.length ? (
         <div className="flex flex-col gap-3">

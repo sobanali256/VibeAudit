@@ -370,6 +370,9 @@ export function maskFinding(f: Finding): Finding {
             url: m(e.url),
             ...(e.bodyExcerpt !== undefined ? { bodyExcerpt: m(e.bodyExcerpt) } : {}),
             ...(e.headers ? { headers: Object.fromEntries(Object.entries(e.headers).map(([k, v]) => [k, m(v)])) } : {}),
+            ...(e.request
+              ? { request: { ...(e.request.headers ? { headers: e.request.headers.map(m) } : {}), ...(e.request.body !== undefined ? { body: m(e.request.body) } : {}) } }
+              : {}),
           };
         case "bundle":
           return { ...e, match: m(e.match) };

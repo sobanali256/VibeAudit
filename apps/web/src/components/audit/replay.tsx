@@ -3,7 +3,9 @@
 import type { PageVisit } from "@vibeaudit/shared";
 import { useEffect, useMemo, useState } from "react";
 
-const FRAME_MS = 450;
+const FRAME_MS = 600;
+/** Hold each page's final screenshot long enough to read it. */
+const FINAL_MS = 1500;
 const NAME_RE = /^[a-z0-9-]{1,40}\.jpg$/;
 
 interface Shot {
@@ -43,9 +45,9 @@ export function Replay({ auditId, pages }: { auditId: string; pages: PageVisit[]
     const t = setTimeout(() => {
       if (i + 1 >= shots.length) setPlaying(false);
       else setI(i + 1);
-    }, FRAME_MS);
+    }, shots[i]?.final ? FINAL_MS : FRAME_MS);
     return () => clearTimeout(t);
-  }, [playing, i, shots.length]);
+  }, [playing, i, shots]);
 
   // Preload the next frame so playback doesn't flicker.
   useEffect(() => {
