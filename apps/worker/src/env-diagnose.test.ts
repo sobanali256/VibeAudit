@@ -51,3 +51,13 @@ describe("outOfMemory", () => {
     expect(outOfMemory("Type error: Property 'x' does not exist")).toBe(false);
   });
 });
+
+describe("appAccepted", () => {
+  it("counts an accepted connection as up even when the page is slow", async () => {
+    const { appAccepted } = await import("./pipeline");
+    expect(appAccepted("0.001017")).toBe(true);
+    expect(appAccepted("0.000000")).toBe(false);
+    expect(appAccepted("")).toBe(false);
+    expect(appAccepted("garbage")).toBe(false);
+  });
+});

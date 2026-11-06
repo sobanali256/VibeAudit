@@ -732,6 +732,12 @@ function sandboxEnv(plan: Plan, canaries: Record<string, string>, id: string, te
   return env;
 }
 
+/** curl's `%{time_connect}` output: a positive time means the TCP connection was accepted. */
+export function appAccepted(stdout: string): boolean {
+  const t = Number.parseFloat(stdout.trim());
+  return Number.isFinite(t) && t > 0;
+}
+
 async function waitForApp(sandbox: Sandbox, appName: string, port: number, deadlineMs: number): Promise<string | null> {
   while (Date.now() < deadlineMs) {
     await new Promise((r) => setTimeout(r, 1500));
@@ -742,14 +748,17 @@ async function waitForApp(sandbox: Sandbox, appName: string, port: number, deadl
       continue;
     }
     // Probe the port from a throwaway container on the same network.
+    // "Up" means it accepts connections, not that its home page renders in 3 s: a server-rendered
+    // page that waits on calls the proxy blocks can be slow, and the probes have their own timeouts.
+    // curl prints the connect time even when the request then times out; 0 = never connected.
     const r = await sandbox.run({
       role: "browser",
       image: "curlimages/curl:8.17.0",
-      cmd: ["-sS", "-o", "/dev/null", "-m", "3", `http://${ip}:${port}/`],
+      cmd: ["-sS", "-o", "/dev/null", "-m", "3", "-w", "%{time_connect}", `http://${ip}:${port}/`],
       timeoutMs: 8000,
       name: `va-${sandbox.auditId}-portcheck`,
     });
-    if (r.code === 0) return ip;
+    if (r.code === 0 || appAccepted(r.stdout)) return ip;
     if (!(await sandbox.isRunning(appName))) return null;
   }
   return null;
