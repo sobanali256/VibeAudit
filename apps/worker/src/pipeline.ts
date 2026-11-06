@@ -307,7 +307,9 @@ export async function runAudit(audit: AuditRow, deps: PipelineDeps): Promise<voi
         const build = await sandbox.run({
           role: "app",
           image,
-          cmd: ["bash", "-lc", `cd ${WORKSPACE_MOUNT}/app && ${plan.buildCommand}`],
+          // `timeout` inside the container too: if the worker dies mid-build (a deploy), the orphaned
+          // build still stops on its own instead of holding its 5 GB next to the next audit.
+          cmd: ["bash", "-lc", `cd ${WORKSPACE_MOUNT}/app && timeout -s KILL ${Math.ceil(STAGE_TIMEOUTS_MS.buildPerTry / 1000) + 30} ${plan.buildCommand}`],
           // Node caps its heap well below the container's memory cap, and large Next.js builds hit
           // that first ("JavaScript heap out of memory"). Give the build most of the container.
           env: { ...sandboxEnv(plan, canaries, id, testKeys, true), NODE_OPTIONS: `--max-old-space-size=${BUILD_HEAP_MB}` },
