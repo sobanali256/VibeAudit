@@ -16,7 +16,7 @@ export const FEATURED: Featured[] = [
     blurb: "A notes app with every classic AI-generated hole, most of them proven by attacking the running app.",
   },
   {
-    id: "dgtyzwmp6uompncxmwzv",
+    id: "yzbiidz2nuojh4ovxqr5",
     repo: "sobanali256/demo-malicious",
     blurb: "A harmless-looking weather app whose install script attacks the sandbox. See which control stopped each move.",
   },
