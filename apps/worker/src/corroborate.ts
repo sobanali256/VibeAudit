@@ -35,10 +35,25 @@ interface Rule {
    * Those rules demand explicit install-hook wording instead.
    */
   anyCategory?: true;
+  /**
+   * The review must be about install-time code: it says so (INSTALL wording), or the code it
+   * cites is a hook file the install-script scanner itself flagged (scripts/setup.js run by
+   * "postinstall"). The model doesn't always say "postinstall" when the file makes it obvious.
+   */
+  atInstall?: true;
 }
 
 /** Install-hook wording. Not the bare word "install" ("default admin password created on install" is not a hook). */
 const INSTALL = /\b(?:post|pre)install\b|\binstall[- ](?:time|scripts?|hooks?)\b|lifecycle scripts?/i;
+
+/** What a hostile hook does, for review findings about a flagged hook file that don't say "postinstall". */
+/**
+ * What a hostile hook DOES (attack behaviour, not topic nouns: a flagged hook file can be ordinary
+ * build or app code, e.g. next.config.js reached through "prepare": "next build").
+ */
+const HOSTILE = /\b(?:post|pre)install\b|\binstall[- ](?:time|scripts?|hooks?)\b|harvest|steal|exfiltrat|enumerat\w*[^.]*\benv|credential theft|reconnaissance|malicious (?:code|payload|script|package|hook|dependency)|breakout|container escape|docker socket|metadata (?:service|endpoint)|phones? home/i;
+/** App-bug wording: a review saying this is about the app, not install-time malware, even in a hook file. */
+const APP_BUG = /malicious (?:user|input|request|actor|attacker)|\beval\b|\brce\b|hard-?coded|\bxss\b|inject|travers|\bssrf\b|user[- ]supplied|req\.(?:query|body|params)|\bclient\b|bundle/i;
 
 const WRITE = /delet|updat|modif|overwrit|mass.?assign|escalat|\bset (?:their |a |the )?role/i;
 
@@ -53,11 +68,11 @@ const RULES: Rule[] = [
   // The probe tests for "*"; a reflected origin with credentials is a different (worse) bug.
   { target: /^f-cors$/, text: /\bCORS\b/, also: /wildcard|\*|any origin/i, not: /reflect|credential/i, anchor: "none" },
   { target: /^f-open-page-\d+$/, text: /\b(page|panel|dashboard|console|route)\b/i, also: /logged.?out|unauthenticated|without (?:auth|login)|no auth|public|anyone/i, anchor: "route" },
-  // Install-time behaviour: the target must be supply_chain and the review must name an install hook.
-  { target: /^f-exfil-\d+$/, text: /exfiltrat|smuggl/i, also: INSTALL, anchor: "none", anyCategory: true },
-  { target: /^f-egress-/, text: /metadata service|egress|outbound|network connection|docker api|phones? home|bypass(?:es|ing)? (?:the )?proxy/i, also: INSTALL, anchor: "none", anyCategory: true },
+  // Install-time behaviour: the target must be supply_chain and the review must be about install-time code.
+  { target: /^f-exfil-\d+$/, text: /exfiltrat|smuggl/i, not: APP_BUG, atInstall: true, anchor: "none", anyCategory: true },
+  { target: /^f-egress-/, text: /metadata (?:service|endpoint)|egress|outbound|network connection|docker api|phones? home|bypass(?:es|ing)? (?:the |any )?proxy/i, not: APP_BUG, atInstall: true, anchor: "none", anyCategory: true },
   // Same file: the root's own hook and a dependency's hook are different findings.
-  { target: /^f-install-\d+$/, text: INSTALL, anchor: "file", anyCategory: true },
+  { target: /^f-install-\d+$/, text: HOSTILE, not: APP_BUG, atInstall: true, anchor: "file", anyCategory: true },
   // Same file is taken as the same secret (two keys in one config file merge: accepted).
   { target: /^f-secret-\d+$/, text: /\b(secret|api[ _-]?key|credential|token|password)s?\b/i, also: /hard-?coded|committed|\.env\b|bundle|client|browser|front-?end/i, anchor: "file" },
 ];
@@ -68,10 +83,16 @@ const family = (c: Finding["category"]) => (c === "open_data" ? "missing_auth" :
 export function corroborate(findings: readonly Finding[]): Finding[] {
   const targets = new Map(findings.filter((f) => f.source !== "llm_review").map((f) => [f.id, { ...f }]));
   const dropped = new Set<Finding>();
+  // Hook files the install-script scanner flagged (not package.json, which only names the command).
+  const hookFiles = new Set(
+    [...targets.values()]
+      .filter((t) => /^f-install-\d+$/.test(t.id) && t.category === "supply_chain")
+      .flatMap((t) => t.evidence.flatMap((e) => (e.kind === "code" && !/(^|\/)package\.json$/.test(e.file) ? [e.file] : []))),
+  );
 
   for (const f of findings) {
     if (f.source !== "llm_review") continue;
-    const t = pickTarget(f, [...targets.values()]);
+    const t = pickTarget(f, [...targets.values()], hookFiles);
     if (!t || (t.corroboratedBy?.length ?? 0) >= 10) continue;
     const code = f.evidence.find((e) => e.kind === "code" && e.file !== "(unknown)");
     t.corroboratedBy = [
@@ -89,11 +110,13 @@ export function corroborate(findings: readonly Finding[]): Finding[] {
   return findings.flatMap((f) => (f.source === "llm_review" ? (dropped.has(f) ? [] : [f]) : [targets.get(f.id)!]));
 }
 
-function pickTarget(f: Finding, targets: Finding[]): Finding | null {
+function pickTarget(f: Finding, targets: Finding[], hookFiles: Set<string>): Finding | null {
   const text = `${f.title}\n${f.description}`;
   const files = new Set(f.evidence.flatMap((e) => (e.kind === "code" ? [e.file] : [])));
+  const atInstall = INSTALL.test(text) || [...files].some((x) => hookFiles.has(x));
   for (const r of RULES) {
     if (!r.text.test(text) || (r.also && !r.also.test(text)) || r.not?.test(text)) continue;
+    if (r.atInstall && !atInstall) continue;
     const t = targets.find(
       (t) =>
         r.target.test(t.id) &&

@@ -145,3 +145,65 @@ describe("corroborate read vs write (review round 3)", () => {
     expect(ids(corroborate([users, dump, del]))).toEqual(["f-users", del.id]);
   });
 });
+
+describe("corroborate install-time by hook file (live wording, 6 Nov)", () => {
+  const hook = (id: string, title: string, source: Finding["source"], evidence: Finding["evidence"]) =>
+    ({ id, title, source, severity: "critical", category: "supply_chain", description: "", confirmed: true, evidence }) as Finding;
+  const net = { kind: "network" as const, control: "firewall" as const, at: "", stage: "install", target: "tcp 1.2.3.4:443" };
+  const inHook = (title: string, description: string, o: Partial<Finding> = {}) =>
+    review(title, description, { category: "unsafe_defaults", evidence: [code("scripts/setup.js", 40)], ...o });
+
+  it("merges reviews that cite the flagged hook file even without the word postinstall", () => {
+    const out = corroborate([
+      hook("f-install-1", "Install script reads secrets and opens network connections", "install_scan", [code("scripts/setup.js", 1), code("package.json", 6)]),
+      hook("f-egress-direct", "Install-time code opened a direct network connection", "proxy", [net]),
+      inHook("Probes cloud instance metadata service", "Attempts a TCP connection to 169.254.169.254:80, the link-local cloud metadata endpoint."),
+      inHook("Direct egress attempt bypassing any proxy", "Attempts a raw TCP connection to an external IP on 443.", { severity: "medium" }),
+      inHook("Scans process environment for secrets", "Enumerates environment variables matching KEY/TOKEN.", { category: "secret_exposure" }),
+      inHook("Checks for a mounted Docker socket", "Tests for /var/run/docker.sock.", { severity: "medium" }),
+      inHook("Uses var instead of const", "Style issue.", { severity: "low" }),
+      review("Server binds to all interfaces", "app.listen binds to 0.0.0.0 and opens an outbound network connection.", { severity: "low", category: "unsafe_defaults", evidence: [code("server.js", 3)] }),
+    ]);
+    expect(out.find((x) => x.id === "f-egress-direct")!.corroboratedBy!.map((c) => c.title)).toEqual(["Probes cloud instance metadata service", "Direct egress attempt bypassing any proxy"]);
+    expect(out.find((x) => x.id === "f-install-1")!.corroboratedBy!.map((c) => c.title)).toEqual(["Scans process environment for secrets", "Checks for a mounted Docker socket"]);
+    expect(out.map((x) => x.title)).toContain("Uses var instead of const");
+    expect(out.map((x) => x.title)).toContain("Server binds to all interfaces");
+  });
+
+  it("doesn't count package.json as a hook file", () => {
+    const out = corroborate([
+      hook("f-install-1", "Install script runs a hook", "install_scan", [code("package.json", 6)]),
+      review("Secrets committed in package.json config", "A credential sits in the config block.", { category: "secret_exposure", evidence: [code("package.json", 9)] }),
+    ]);
+    expect(out).toHaveLength(2);
+  });
+});
+
+describe("corroborate: a flagged hook file can be app code (review round 4)", () => {
+  const inst = (file: string, severity: Finding["severity"] = "medium") =>
+    ({ id: "f-install-1", title: "Install-time code makes network calls", source: "install_scan", severity, category: "supply_chain", description: "", confirmed: false, evidence: [code(file, 1)] }) as Finding;
+  const egress = { id: "f-egress-blocked", title: "Install-time code contacted an unexpected host", source: "proxy", severity: "medium", category: "supply_chain", description: "", confirmed: true, evidence: [{ kind: "network", control: "proxy", at: "", stage: "install", target: "GET x" }] } as Finding;
+  const at = (file: string, title: string, description: string, o: Partial<Finding> = {}) => review(title, description, { severity: "medium", category: "secret_exposure", evidence: [code(file, 9)], ...o });
+
+  it("keeps app bugs in hook files as their own findings", () => {
+    const cases: [Finding, Finding][] = [
+      [inst("next.config.js"), at("next.config.js", "STRIPE_SECRET exposed to the client via next.config env", "The env block ships the secret to the browser.")],
+      [inst("scripts/sitemap.js"), at("scripts/sitemap.js", "Hardcoded CMS token", "A CMS token is hardcoded.")],
+      [inst("server.js", "critical"), at("server.js", "Hardcoded JWT secret", "jwt.sign uses a literal secret.", { severity: "critical" })],
+      [inst("server.js"), at("server.js", "Path traversal lets attackers escape the uploads dir", "req.params.name is joined into a path.", { category: "unsafe_defaults" })],
+      [{ ...egress, evidence: egress.evidence } as Finding, at("lib/fetch.js", "SSRF via outbound request to user-supplied URL", "fetch(req.query.url) makes an outbound network connection.", { category: "unsafe_defaults" })],
+    ];
+    for (const [t, r] of cases) {
+      const extra = t.id === "f-egress-blocked" ? [inst("lib/fetch.js")] : [];
+      expect(corroborate([t, ...extra, r]).map((x) => x.id)).toContain(r.id);
+    }
+  });
+});
+
+describe("corroborate: 'malicious input' is an app bug (review round 5)", () => {
+  it("keeps an eval/RCE review in a hook file separate", () => {
+    const inst = { id: "f-install-1", title: "Install-time code makes network calls", source: "install_scan", severity: "medium", category: "supply_chain", description: "", confirmed: false, evidence: [code("server.js", 1)] } as Finding;
+    const rce = review("Admin route is malicious-input unsafe: eval of user data", "A malicious user can run code via eval.", { severity: "medium", category: "unsafe_defaults" });
+    expect(ids(corroborate([inst, rce]))).toEqual(["f-install-1", rce.id]);
+  });
+});
