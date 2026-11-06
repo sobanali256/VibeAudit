@@ -1,4 +1,7 @@
+"use client";
+
 import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, SandboxControls, Severity } from "@vibeaudit/shared";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LocalTime } from "@/components/local-time";
 import { describeAttempt } from "./attempts";
 import { Replay } from "./replay";
@@ -28,18 +31,150 @@ function artifactUrl(auditId: string, name: string): string | null {
   return `/api/audits/${encodeURIComponent(auditId)}/artifacts/${name}`;
 }
 
-/** The scorecard. Everything in it can contain repo- or sandbox-derived text: plain text only. */
-export function ReportView({ report }: { report: Report }) {
-  const findings = [...report.findings].sort(
-    (a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) || Number(b.confirmed) - Number(a.confirmed),
+/** Checks that prove a finding by running the app, as opposed to confirming it from the code. */
+const RUNTIME_SOURCES = new Set<Finding["source"]>(["probe", "proxy", "vision"]);
+type Proof = "runtime" | "code" | "suspicion";
+function proofOf(f: Finding): Proof {
+  // A planted marker found in the bundle the sandbox built is proof too, though its source is the scanner.
+  if (f.confirmed && (RUNTIME_SOURCES.has(f.source) || f.evidence.some((e) => e.kind === "bundle"))) return "runtime";
+  return f.confirmed ? "code" : "suspicion";
+}
+const PROOF_LABEL: Record<Proof, string> = { runtime: "Proven at runtime", code: "Confirmed in the code", suspicion: "Static suspicion" };
+
+const isDep = (f: Finding) => f.source === "dep_audit" && f.category === "vulnerable_dependency";
+const isAttempt = (e: ContainmentEntry) => !(e.source === "proxy" && e.verdict === "allowed");
+
+type TabId = "overview" | "findings" | "sandbox" | "browser" | "dependencies" | "activity";
+const TAB_IDS: TabId[] = ["overview", "findings", "sandbox", "browser", "dependencies", "activity"];
+
+/**
+ * The scorecard: a summary that always shows, then tabs. Everything in it can contain repo- or
+ * sandbox-derived text: plain text only. The open tab is kept in the URL hash (#findings) so a
+ * link lands on it.
+ */
+export function ReportView({ report, activity }: { report: Report; activity?: ReactNode }) {
+  const findings = useMemo(
+    () =>
+      [...report.findings].sort(
+        (a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) || Number(b.confirmed) - Number(a.confirmed),
+      ),
+    [report.findings],
   );
   // Supply-chain findings that look hostile get a banner above everything else.
   const hostile = findings.filter((f) => f.category === "supply_chain" && (f.severity === "critical" || f.severity === "high"));
-  // Known-vulnerable dependency versions: listed together, below what the audit found in the app.
-  const isDep = (f: Finding) => f.source === "dep_audit" && f.category === "vulnerable_dependency";
-  const appFindings = findings.filter((f) => !isDep(f));
-  const depFindings = findings.filter(isDep);
+  const appFindings = useMemo(() => findings.filter((f) => !isDep(f)), [findings]);
+  const depFindings = useMemo(() => findings.filter(isDep), [findings]);
   const counts = SEV_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length] as const).filter(([, n]) => n);
+  const attempts = report.containment.filter(isAttempt).length;
+
+  const tabs = useMemo(() => {
+    const t: { id: TabId; label: string; count?: number }[] = [{ id: "overview", label: "Overview" }];
+    t.push({ id: "findings", label: "Findings", count: appFindings.length });
+    t.push({ id: "sandbox", label: "Sandbox", count: attempts || undefined });
+    if (report.pages?.length) t.push({ id: "browser", label: "Browser", count: report.pages.length });
+    if (depFindings.length) t.push({ id: "dependencies", label: "Dependencies", count: depFindings.length });
+    if (activity) t.push({ id: "activity", label: "Activity log" });
+    return t;
+  }, [appFindings.length, attempts, report.pages, depFindings.length, activity]);
+
+  const [tab, setTabState] = useState<TabId>("overview");
+  // The finding to open next (set together with a focusSeq bump; read by the effect below).
+  const focusTarget = useRef<string | null>(null);
+  // Bumped whenever a finding is opened from outside the Findings tab: remounts it with no filters.
+  const [focusSeq, setFocusSeq] = useState(0);
+
+  const depIds = useMemo(() => new Set(depFindings.map((f) => f.id)), [depFindings]);
+  const writeHash = (h: string) => {
+    try {
+      window.history.replaceState(null, "", `#${h}`);
+    } catch {
+      // ignore (sandboxed iframes)
+    }
+  };
+
+  // Open the tab named in the URL (#findings, or #finding-<id> for one finding).
+  useEffect(() => {
+    const read = () => {
+      let h = window.location.hash.slice(1);
+      try {
+        h = decodeURIComponent(h);
+      } catch {
+        // a malformed escape (#%E0): use it raw; it just won't match anything
+      }
+      if (h.startsWith("finding-")) {
+        const id = h.slice("finding-".length);
+        setTabState(depIds.has(id) ? "dependencies" : "findings");
+        focusTarget.current = id;
+        setFocusSeq((n) => n + 1);
+      } else if ((TAB_IDS as string[]).includes(h)) setTabState(h as TabId);
+    };
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, [depIds]);
+
+  const setTab = useCallback((id: TabId) => {
+    setTabState(id);
+    writeHash(id);
+  }, []);
+
+  const openFinding = useCallback(
+    (id: string) => {
+      setTabState(depIds.has(id) ? "dependencies" : "findings");
+      focusTarget.current = id;
+      setFocusSeq((n) => n + 1);
+      writeHash(`finding-${id}`);
+    },
+    [depIds],
+  );
+
+  // Once the finding's tab is showing (panels are always mounted; the Findings one was just
+  // remounted without filters): open it, scroll to it, and move keyboard focus onto it.
+  useEffect(() => {
+    const id = focusTarget.current;
+    focusTarget.current = null;
+    if (!id) return;
+    const el = document.getElementById(`finding-${id}`);
+    if (el instanceof HTMLDetailsElement) {
+      el.open = true;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      el.querySelector("summary")?.focus({ preventScroll: true });
+    }
+  }, [focusSeq]);
+
+  const current = tabs.some((t) => t.id === tab) ? tab : "overview";
+  const content = (id: TabId): ReactNode => {
+    switch (id) {
+      case "overview":
+        return (
+          <Overview
+            report={report}
+            findings={appFindings}
+            attempts={attempts}
+            onOpenFinding={openFinding}
+            onTab={(t) => {
+              setTab(t);
+              requestAnimationFrame(() => document.getElementById(`tab-${t}`)?.focus());
+            }}
+          />
+        );
+      case "findings":
+        return <FindingsPanel key={focusSeq} findings={appFindings} auditId={report.auditId} />;
+      case "sandbox":
+        return <Containment entries={report.containment} controls={report.controls} />;
+      case "browser":
+        return report.pages?.length ? (
+          <div className="flex flex-col gap-6">
+            <Replay auditId={report.auditId} pages={report.pages} />
+            <Pages pages={report.pages} auditId={report.auditId} />
+          </div>
+        ) : null;
+      case "dependencies":
+        return <Dependencies findings={depFindings} auditId={report.auditId} />;
+      case "activity":
+        return activity ?? null;
+    }
+  };
 
   return (
     <section aria-labelledby="report-title" className="flex flex-col gap-6">
@@ -72,6 +207,11 @@ export function ReportView({ report }: { report: Report }) {
             ) : (
               <span className="text-sm text-emerald-700 dark:text-emerald-400">No findings.</span>
             )}
+            {depFindings.length ? (
+              <span className="self-center text-xs text-zinc-500">
+                incl. {depFindings.length} dependency advisor{depFindings.length === 1 ? "y" : "ies"}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -92,24 +232,158 @@ export function ReportView({ report }: { report: Report }) {
         </div>
       ) : null}
 
-      <AttackConsole report={report} />
+      <div className="flex flex-col gap-5">
+        <TabBar tabs={tabs} current={current} onSelect={setTab} />
+        {/* Every panel stays mounted (hidden when inactive): Ctrl+F, printing and screen readers
+            reach the whole report, filters survive a tab switch, and the console plays once. */}
+        {tabs.map((t) => (
+          <div
+            key={t.id}
+            role="tabpanel"
+            id={`panel-${t.id}`}
+            aria-labelledby={`tab-${t.id}`}
+            tabIndex={0}
+            hidden={t.id !== current}
+            className="outline-none print:!block"
+          >
+            {content(t.id)}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
-      {appFindings.length ? (
-        <div className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Findings</h3>
-          {appFindings.map((f) => (
-            <FindingCard key={f.id} f={f} auditId={report.auditId} />
-          ))}
+function TabBar({
+  tabs,
+  current,
+  onSelect,
+}: {
+  tabs: { id: TabId; label: string; count?: number }[];
+  current: TabId;
+  onSelect: (id: TabId) => void;
+}) {
+  const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const go = (i: number) => {
+    const next = tabs[(i + tabs.length) % tabs.length]!;
+    onSelect(next.id);
+    refs.current[next.id]?.focus();
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label="Report sections"
+      className="-mx-4 flex gap-1 overflow-x-auto border-b border-zinc-200 px-4 sm:mx-0 sm:px-0 dark:border-zinc-800"
+      onKeyDown={(e) => {
+        const i = tabs.findIndex((t) => t.id === current);
+        if (e.key === "ArrowRight") go(i + 1);
+        else if (e.key === "ArrowLeft") go(i - 1);
+        else if (e.key === "Home") go(0);
+        else if (e.key === "End") go(tabs.length - 1);
+        else return;
+        e.preventDefault();
+      }}
+    >
+      {tabs.map((t) => {
+        const on = t.id === current;
+        return (
+          <button
+            key={t.id}
+            ref={(el) => {
+              refs.current[t.id] = el;
+            }}
+            id={`tab-${t.id}`}
+            role="tab"
+            type="button"
+            aria-selected={on}
+            aria-controls={`panel-${t.id}`}
+            tabIndex={on ? 0 : -1}
+            onClick={() => onSelect(t.id)}
+            className={`-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap ${
+              on
+                ? "border-zinc-900 font-medium text-zinc-900 dark:border-zinc-100 dark:text-zinc-100"
+                : "border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+            }`}
+          >
+            {t.label}
+            {t.count !== undefined ? (
+              <span className="rounded-full bg-zinc-100 px-1.5 text-xs text-zinc-600 tabular-nums dark:bg-zinc-800 dark:text-zinc-300">
+                {t.count}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Overview({
+  report,
+  findings,
+  attempts,
+  onOpenFinding,
+  onTab,
+}: {
+  report: Report;
+  findings: Finding[];
+  attempts: number;
+  onOpenFinding: (id: string) => void;
+  onTab: (id: TabId) => void;
+}) {
+  const top = findings.filter((f) => f.severity === "critical" || f.severity === "high");
+  const proven = findings.filter((f) => proofOf(f) === "runtime").length;
+  const stats: { label: string; value: number; tab: TabId }[] = [
+    { label: "Proven at runtime", value: proven, tab: "findings" },
+    { label: "Other findings", value: findings.length - proven, tab: "findings" },
+    { label: "Attempts stopped by the sandbox", value: attempts, tab: "sandbox" },
+    ...(report.pages?.length ? [{ label: "Pages visited logged out", value: report.pages.length, tab: "browser" as TabId }] : []),
+  ];
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {stats.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            onClick={() => onTab(s.tab)}
+            className="flex flex-col items-start rounded-lg border border-zinc-200 p-3 text-left hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600"
+          >
+            <span className="text-2xl font-semibold tabular-nums">{s.value}</span>
+            <span className="text-xs text-zinc-500">{s.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {top.length ? (
+        <div className="flex flex-col gap-2">
+          <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Fix these first</h3>
+          <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
+            {top.map((f) => (
+              <li key={f.id}>
+                <button
+                  type="button"
+                  onClick={() => onOpenFinding(f.id)}
+                  className="flex w-full flex-wrap items-center gap-2 px-3 py-2 text-left text-sm hover:bg-zinc-50 dark:hover:bg-zinc-900"
+                >
+                  <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[f.severity]}`}>{f.severity}</span>
+                  <span className="min-w-0 flex-1 font-medium break-words">{f.title}</span>
+                  <span className={`text-xs ${proofOf(f) === "runtime" ? "text-emerald-700 dark:text-emerald-400" : "text-zinc-500"}`}>
+                    {PROOF_LABEL[proofOf(f)]}
+                  </span>
+                  <span aria-hidden className="text-zinc-400">
+                    →
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
-      ) : null}
+      ) : (
+        <p className="text-sm text-emerald-700 dark:text-emerald-400">Nothing critical or high was found in the app itself.</p>
+      )}
 
-      {depFindings.length ? <DependencyGroup findings={depFindings} auditId={report.auditId} /> : null}
-
-      {report.pages?.length ? <Replay auditId={report.auditId} pages={report.pages} /> : null}
-
-      {report.pages?.length ? <Pages pages={report.pages} auditId={report.auditId} /> : null}
-
-      <Containment entries={report.containment} controls={report.controls} />
+      <AttackConsole report={report} />
 
       {report.lighthouse ? (
         <div className="flex flex-col gap-2">
@@ -124,7 +398,149 @@ export function ReportView({ report }: { report: Report }) {
           </div>
         </div>
       ) : null}
-    </section>
+    </div>
+  );
+}
+
+type ProofFilter = "all" | Proof;
+
+function FindingsPanel({ findings, auditId }: { findings: Finding[]; auditId: string }) {
+  const [sevs, setSevs] = useState<Set<Severity>>(new Set());
+  const [proof, setProof] = useState<ProofFilter>("all");
+  const [cat, setCat] = useState<Finding["category"] | "all">("all");
+  const [q, setQ] = useState("");
+  const [expandAll, setExpandAll] = useState<{ open: boolean; n: number }>({ open: false, n: 0 });
+
+  const sevCounts = SEV_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length] as const).filter(([, n]) => n);
+  const proofCounts = (["runtime", "code", "suspicion"] as Proof[]).map((p) => [p, findings.filter((f) => proofOf(f) === p).length] as const);
+  const cats = [...new Set(findings.map((f) => f.category))];
+  const needle = q.trim().toLowerCase();
+  const shown = findings.filter(
+    (f) =>
+      (!sevs.size || sevs.has(f.severity)) &&
+      (proof === "all" || proofOf(f) === proof) &&
+      (cat === "all" || f.category === cat) &&
+      (!needle ||
+        `${f.title}\n${f.description}\n${f.evidence.map((e) => (e.kind === "code" ? e.file : e.kind === "http" ? e.url : "")).join(" ")}`
+          .toLowerCase()
+          .includes(needle)),
+  );
+  const filtered = sevs.size > 0 || proof !== "all" || cat !== "all" || needle !== "";
+  const clear = () => {
+    setSevs(new Set());
+    setProof("all");
+    setCat("all");
+    setQ("");
+  };
+
+
+  if (!findings.length) return <p className="text-sm text-emerald-700 dark:text-emerald-400">No findings in the app itself.</p>;
+
+  const chip = (on: boolean) =>
+    `rounded-full border px-2.5 py-1 text-xs ${
+      on
+        ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+        : "border-zinc-300 text-zinc-700 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-300"
+    }`;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by severity">
+          <span className="w-16 text-xs text-zinc-500">Severity</span>
+          {sevCounts.map(([s, n]) => {
+            const on = sevs.has(s);
+            return (
+              <button
+                key={s}
+                type="button"
+                aria-pressed={on}
+                onClick={() => {
+                  const next = new Set(sevs);
+                  if (on) next.delete(s);
+                  else next.add(s);
+                  setSevs(next);
+                }}
+                className={chip(on)}
+              >
+                {s} <span className="tabular-nums opacity-70">{n}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by proof">
+          <span className="w-16 text-xs text-zinc-500">Proof</span>
+          <button type="button" aria-pressed={proof === "all"} onClick={() => setProof("all")} className={chip(proof === "all")}>
+            All
+          </button>
+          {proofCounts.map(([p, n]) =>
+            n ? (
+              <button key={p} type="button" aria-pressed={proof === p} onClick={() => setProof(proof === p ? "all" : p)} className={chip(proof === p)}>
+                {PROOF_LABEL[p]} <span className="tabular-nums opacity-70">{n}</span>
+              </button>
+            ) : null,
+          )}
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label className="flex items-center gap-2 text-xs text-zinc-500">
+            <span className="w-16">Category</span>
+            <select
+              value={cat}
+              onChange={(e) => setCat(e.target.value as Finding["category"] | "all")}
+              className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-800 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+            >
+              <option value="all">All categories</option>
+              {cats.map((c) => (
+                <option key={c} value={c}>
+                  {CATEGORY[c]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search title, description, file or route"
+            aria-label="Search findings"
+            className="h-8 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
+        <span>
+          <span aria-live="polite">
+            {shown.length === findings.length
+              ? `${findings.length} finding${findings.length === 1 ? "" : "s"}`
+              : `${shown.length} of ${findings.length} findings`}
+          </span>
+          {filtered ? (
+            <>
+              {" · "}
+              <button type="button" onClick={clear} className="underline underline-offset-2">
+                Clear filters
+              </button>
+            </>
+          ) : null}
+        </span>
+        <span className="flex gap-3">
+          <button type="button" onClick={() => setExpandAll((s) => ({ open: true, n: s.n + 1 }))} className="underline underline-offset-2">
+            Expand all
+          </button>
+          <button type="button" onClick={() => setExpandAll((s) => ({ open: false, n: s.n + 1 }))} className="underline underline-offset-2">
+            Collapse all
+          </button>
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        {shown.map((f) => (
+          <FindingCard key={`${f.id}-${expandAll.n}`} f={f} auditId={auditId} defaultOpen={expandAll.open} />
+        ))}
+        {!shown.length ? <p className="text-sm text-zinc-600 dark:text-zinc-400">No findings match these filters.</p> : null}
+      </div>
+    </div>
   );
 }
 
@@ -139,83 +555,81 @@ function Score({ score }: { score: number }) {
   const s = Math.round(score);
   const color = s >= 80 ? "text-emerald-600" : s >= 50 ? "text-amber-600" : "text-red-600";
   return (
-    <div className="flex flex-col items-center justify-center px-4" aria-label={`Score ${s} out of 100`}>
-      <span className={`text-5xl font-bold tabular-nums ${color}`}>{s}</span>
-      <span className="text-xs text-zinc-500">/ 100</span>
+    <div className="flex flex-col items-center justify-center px-4">
+      <span className={`text-5xl font-bold tabular-nums ${color}`}>
+        {s}
+        <span className="sr-only"> out of 100</span>
+      </span>
+      <span aria-hidden className="text-xs text-zinc-500">
+        / 100
+      </span>
     </div>
   );
 }
 
-function DependencyGroup({ findings, auditId }: { findings: Finding[]; auditId: string }) {
-  const worst = SEV_ORDER.find((s) => findings.some((f) => f.severity === s))!;
+function Dependencies({ findings, auditId }: { findings: Finding[]; auditId: string }) {
   return (
-    <details className="group rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 text-sm [&::-webkit-details-marker]:hidden">
-        <span aria-hidden className="inline-block text-zinc-500 transition-transform group-open:rotate-90">▶</span>
-        <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[worst]}`}>{worst}</span>
-        <span className="font-medium">
-          {findings.length} package{findings.length === 1 ? "" : "s"} with known vulnerabilities
-        </span>
-        <span className="text-xs text-zinc-500">
-          OSV.dev advisories for installed versions. Counted at half weight, and at most 30 points together.
-        </span>
-      </summary>
-      <div className="mt-3 flex flex-col gap-3">
+    <div className="flex flex-col gap-3">
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        {findings.length} package{findings.length === 1 ? "" : "s"} with known vulnerabilities, from OSV.dev advisories for the installed
+        versions. They count at half weight, and at most 30 points together.
+      </p>
+      <div className="flex flex-col gap-2">
         {findings.map((f) => (
           <FindingCard key={f.id} f={f} auditId={auditId} />
         ))}
       </div>
-    </details>
+    </div>
   );
 }
 
-/** Checks that prove a finding by running the app, as opposed to confirming it from the code. */
-const RUNTIME_SOURCES = new Set<Finding["source"]>(["probe", "proxy", "vision"]);
-
-function FindingCard({ f, auditId }: { f: Finding; auditId: string }) {
-  // A planted marker found in the bundle the sandbox built is proof too, though its source is the scanner.
-  const runtime = f.confirmed && (RUNTIME_SOURCES.has(f.source) || f.evidence.some((e) => e.kind === "bundle"));
+function FindingCard({ f, auditId, defaultOpen = false }: { f: Finding; auditId: string; defaultOpen?: boolean }) {
+  const proof = proofOf(f);
+  const runtime = proof === "runtime";
   return (
-    <article className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <header className="flex flex-wrap items-center gap-2">
-        <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[f.severity]}`}>{f.severity}</span>
-        <h4 className="font-medium">{f.title}</h4>
-      </header>
-      <div className="flex flex-wrap gap-2 text-xs text-zinc-500">
-        <span>{CATEGORY[f.category]}</span>
-        <span aria-hidden>·</span>
-        <span className={f.confirmed ? "text-emerald-700 dark:text-emerald-400" : ""}>
-          {runtime ? "Proven at runtime" : f.confirmed ? "Confirmed in the code" : "Static suspicion"}
+    <details id={`finding-${f.id}`} open={defaultOpen} className="group scroll-mt-4 rounded-lg border border-zinc-200 dark:border-zinc-800">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 p-3 [&::-webkit-details-marker]:hidden">
+        <span aria-hidden className="inline-block w-3 text-xs text-zinc-400 transition-transform group-open:rotate-90">
+          ▶
         </span>
+        <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEV_STYLE[f.severity]}`}>{f.severity}</span>
+        <h4 className="min-w-0 flex-1 font-medium break-words">{f.title}</h4>
+        <span className="flex flex-wrap gap-2 text-xs text-zinc-500">
+          <span>{CATEGORY[f.category]}</span>
+          <span aria-hidden>·</span>
+          <span className={f.confirmed ? "text-emerald-700 dark:text-emerald-400" : ""}>{PROOF_LABEL[proof]}</span>
+          {f.corroboratedBy?.length ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="text-violet-700 dark:text-violet-400">
+                {runtime ? "Suspected by code review, then proven" : "Also flagged by code review"}
+              </span>
+            </>
+          ) : null}
+        </span>
+      </summary>
+      <div className="flex flex-col gap-3 border-t border-zinc-200 p-4 dark:border-zinc-800">
         {f.corroboratedBy?.length ? (
-          <>
-            <span aria-hidden>·</span>
-            <span className="text-violet-700 dark:text-violet-400">
-              {runtime ? "Suspected by code review, then proven" : "Also flagged by code review"}
-            </span>
-          </>
+          <p className="rounded-md bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:bg-violet-950/40 dark:text-violet-200">
+            <span className="font-medium">The LLM code review reported this independently</span>
+            {runtime ? ", before the sandbox proved it" : ""}:{" "}
+            {f.corroboratedBy.map((c) => `“${c.title}”${c.file ? ` (${c.file}${c.line ? `:${c.line}` : ""})` : ""}`).join(", ")}.
+          </p>
+        ) : null}
+        <p className="text-sm leading-6 text-zinc-700 dark:text-zinc-300">{f.description}</p>
+        <div className="flex flex-col gap-2">
+          {f.evidence.map((e, i) => (
+            <EvidenceBlock key={i} e={e} auditId={auditId} />
+          ))}
+        </div>
+        {f.fix ? (
+          <p className="text-sm text-zinc-700 dark:text-zinc-300">
+            <span className="font-medium">Fix: </span>
+            {f.fix}
+          </p>
         ) : null}
       </div>
-      {f.corroboratedBy?.length ? (
-        <p className="rounded-md bg-violet-50 px-3 py-2 text-xs text-violet-900 dark:bg-violet-950/40 dark:text-violet-200">
-          <span className="font-medium">The LLM code review reported this independently</span>
-          {runtime ? ", before the sandbox proved it" : ""}:{" "}
-          {f.corroboratedBy.map((c) => `“${c.title}”${c.file ? ` (${c.file}${c.line ? `:${c.line}` : ""})` : ""}`).join(", ")}.
-        </p>
-      ) : null}
-      <p className="text-sm leading-6 text-zinc-700 dark:text-zinc-300">{f.description}</p>
-      <div className="flex flex-col gap-2">
-        {f.evidence.map((e, i) => (
-          <EvidenceBlock key={i} e={e} auditId={auditId} />
-        ))}
-      </div>
-      {f.fix ? (
-        <p className="text-sm text-zinc-700 dark:text-zinc-300">
-          <span className="font-medium">Fix: </span>
-          {f.fix}
-        </p>
-      ) : null}
-    </article>
+    </details>
   );
 }
 

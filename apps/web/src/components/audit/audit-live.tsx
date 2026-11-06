@@ -143,9 +143,12 @@ export function AuditLive({ initial }: { initial: AuditView }) {
         <Notice>This audit was cancelled{view.error ? ` (${view.error})` : ""}.</Notice>
       ) : null}
 
-      {view.report ? <ReportView report={view.report} /> : null}
-
-      <EventLog events={events} />
+      {/* With a report, the activity log is one of its tabs; while running, it's the main view. */}
+      {view.report ? (
+        <ReportView report={view.report} activity={events.length ? <EventLog events={events} /> : undefined} />
+      ) : (
+        <EventLog events={events} />
+      )}
     </div>
   );
 }
