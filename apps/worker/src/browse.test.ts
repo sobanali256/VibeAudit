@@ -91,7 +91,7 @@ describe("parseBrowse", () => {
 
 describe("worthKeeping", () => {
   const cap = (o: Partial<PageCapture>): PageCapture => ({
-    path: "/", status: 200, finalPath: o.path ?? "/", title: "App", text: "Welcome", hasPassword: false, loaded: true, screenshot: jpeg(), ...o,
+    path: "/", status: 200, finalPath: o.path ?? "/", title: "App", text: "Welcome", hasPassword: false, loaded: true, screenshot: jpeg(), frames: [], ...o,
   });
 
   it("keeps home and distinct 2xx pages, drops 404s, SPA fallbacks and missing screenshots", () => {
@@ -127,5 +127,26 @@ describe("BROWSE_SCRIPT", () => {
     expect(BROWSE_SCRIPT).toContain("--proxy-bypass-list=");
     expect(BROWSE_SCRIPT).toContain("disable_non_proxied_udp");
     expect(BROWSE_SCRIPT).toContain("Page.createIsolatedWorld");
+  });
+});
+
+describe("parseBrowse replay frames", () => {
+  it("keeps valid JPEG frames, drops anything else, and caps the count per page", () => {
+    const good = b64(jpeg());
+    const out = [
+      line({ p: "/", status: 200, img: good, fr: [good, "<svg/>", b64(Buffer.from("not a jpeg at all")), good, "A".repeat(150_004)] }),
+      line({ p: "/admin", status: 404, fr: Array(7).fill(good) }), // over the per-page cap: the field is dropped
+      line({ p: "/dashboard", status: 200, fr: "nope" }),
+    ].join("\n");
+    const { pages } = parseBrowse(out, ["/", "/admin", "/dashboard"], BASE);
+    expect(pages.map((p) => p.frames.length)).toEqual([2, 0, 0]);
+    expect(pages[0]!.frames[0]!.equals(jpeg())).toBe(true);
+    expect(pages[0]!.screenshot).not.toBeNull();
+  });
+
+  it("asks Chromium for a bounded screencast and acks every frame", () => {
+    expect(BROWSE_SCRIPT).toContain("Page.startScreencast");
+    expect(BROWSE_SCRIPT).toContain("Page.screencastFrameAck");
+    expect(BROWSE_SCRIPT).toContain("Page.stopScreencast");
   });
 });

@@ -1,6 +1,7 @@
 import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, SandboxControls, Severity } from "@vibeaudit/shared";
 import { LocalTime } from "@/components/local-time";
 import { describeAttempt } from "./attempts";
+import { Replay } from "./replay";
 
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
 const SEV_STYLE: Record<Severity, string> = {
@@ -100,6 +101,8 @@ export function ReportView({ report }: { report: Report }) {
       ) : null}
 
       {depFindings.length ? <DependencyGroup findings={depFindings} auditId={report.auditId} /> : null}
+
+      {report.pages?.length ? <Replay auditId={report.auditId} pages={report.pages} /> : null}
 
       {report.pages?.length ? <Pages pages={report.pages} auditId={report.auditId} /> : null}
 

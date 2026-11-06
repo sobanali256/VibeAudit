@@ -5,7 +5,7 @@ import { cleanReason, parseVerdict, showsData, verifyPages, visionCandidates, vi
 
 const shot = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 0xff, 0xd9]);
 const cap = (o: Partial<PageCapture>): PageCapture => ({
-  path: "/admin", status: 200, finalPath: "/admin", title: "Admin", text: "Users", hasPassword: false, loaded: true, screenshot: shot, ...o,
+  path: "/admin", status: 200, finalPath: "/admin", title: "Admin", text: "Users", hasPassword: false, loaded: true, screenshot: shot, frames: [], ...o,
 });
 const fake = (reply: (user: string) => string | Promise<string>): LlmClient & { calls: { user: string; images?: readonly Buffer[] }[] } => {
   const calls: { user: string; images?: readonly Buffer[] }[] = [];

@@ -36,6 +36,8 @@ export const PageVisit = z.object({
   screenshot: z.string().optional(),
   /** What the vision model saw, when it ran. */
   verdict: z.string().optional(),
+  /** Replay frames recorded while the page loaded (artifact names, oldest first). */
+  frames: z.array(z.string()).max(10).optional(),
 });
 export type PageVisit = z.infer<typeof PageVisit>;
 

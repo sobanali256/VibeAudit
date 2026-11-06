@@ -45,4 +45,7 @@ g.__vibeauditLimits ??= {
   approve: new RateLimiter(20, 60_000),
   read: new RateLimiter(120, 60_000),
 };
+// Evidence images: one report replay is ~45 of them, and judges at one venue share an IP.
+// Immutable and cached for a day, so a generous separate budget is cheap.
+g.__vibeauditLimits.artifact ??= new RateLimiter(900, 60_000);
 export const limits = g.__vibeauditLimits;

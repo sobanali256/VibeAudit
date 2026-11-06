@@ -1001,8 +1001,23 @@ async function capturePages(sandbox: Sandbox, id: string, ip: string, port: numb
         // best effort: the visit is still reported, just without its picture
       }
     }
+    // Replay frames: every visited page, not just the kept ones (a 404 or a login redirect is
+    // part of what happened). Same JPEG checks as screenshots, done in browse.ts.
+    const frames: string[] = [];
+    if (!stopped()) {
+      for (const [j, f] of c.frames.entries()) {
+        const name = `frame-${i + 1}-${j + 1}.jpg`;
+        try {
+          await putArtifact(sql, id, name, f);
+          frames.push(name);
+        } catch {
+          break; // best effort
+        }
+      }
+    }
     visits.push({
       path: c.path,
+      frames: frames.length ? frames : undefined,
       status: c.status,
       // Page-controlled text: mask any secret-looking value before it reaches the report.
       finalPath: c.finalPath === undefined ? c.path : c.finalPath === null ? null : maskSecrets(c.finalPath),
@@ -1011,7 +1026,7 @@ async function capturePages(sandbox: Sandbox, id: string, ip: string, port: numb
     });
   }
   const summary = captured.length
-    ? `browser: ${captured.length} page(s) visited, ${stored} screenshot(s) kept`
+    ? `browser: ${captured.length} page(s) visited, ${stored} screenshot(s) kept, ${captured.reduce((n, c) => n + c.frames.length, 0)} replay frame(s)${why ? ` (${why})` : ""}`
     : `browser: no pages captured${why ? ` (${why})` : ""}`;
   await ev(sql, id, "log", { stage: "dynamic", msg: summary }).catch(() => {});
   return { visits, captures: captured };

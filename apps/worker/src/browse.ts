@@ -22,8 +22,19 @@ const MAX_TITLE = 300;
 const MAX_URL = 2_000;
 /** Base64 cap per screenshot (~450 KB decoded); a 1280x800 JPEG at q60 is usually < 150 KB. */
 const MAX_IMG_B64 = 600_000;
-/** Whole-run stdout cap: MAX_PAGES screenshots plus text, with headroom. */
-export const BROWSE_MAX_OUTPUT = 6 * 1024 * 1024;
+/**
+ * Replay frames (Chromium's screencast while each page loads): small JPEGs, a few per page,
+ * at least FRAME_GAP_MS apart. Caps keep the whole run's output bounded whatever the page does.
+ */
+export const MAX_FRAMES_PER_PAGE = 6;
+export const MAX_FRAMES_TOTAL = 36;
+const FRAME_GAP_MS = 250;
+/** Base64 cap per frame (~110 KB decoded); a 640x400 JPEG at q40 is usually < 40 KB. */
+const MAX_FRAME_B64 = 150_000;
+/** All frames together, so screenshots (the evidence) always fit in the output cap first. */
+const MAX_FRAME_BYTES_TOTAL = 2_000_000;
+/** Whole-run stdout cap: MAX_PAGES screenshots, the replay frames and text, with headroom. */
+export const BROWSE_MAX_OUTPUT = 8 * 1024 * 1024; // the sandbox run ceiling; lines are per page, so a cut-off run still parses
 
 /**
  * Runs as `node -e` in the browser container. Inputs come via env (VA_BASE, VA_PATHS,
@@ -37,7 +48,8 @@ export const BROWSE_MAX_OUTPUT = 6 * 1024 * 1024;
 export const BROWSE_SCRIPT = `
 const {spawn}=require("child_process"),fs=require("fs");
 const BASE=process.env.VA_BASE,PATHS=JSON.parse(process.env.VA_PATHS||"[]"),BYPASS=process.env.VA_BYPASS;
-const LOAD=${PAGE_LOAD_MS},SETTLE=${SETTLE_MS},MAXT=${MAX_TEXT};
+const LOAD=${PAGE_LOAD_MS},SETTLE=${SETTLE_MS},MAXT=${MAX_TEXT},FPP=${MAX_FRAMES_PER_PAGE},FGAP=${FRAME_GAP_MS},FB64=${MAX_FRAME_B64};
+let framesLeft=${MAX_FRAMES_TOTAL},frameBytes=0;const FBUDGET=${MAX_FRAME_BYTES_TOTAL},IMGMAX=${MAX_IMG_B64};
 const out=o=>process.stdout.write("__VA_PAGE__"+JSON.stringify(o)+"\\n");
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const root="/ms-playwright";
@@ -52,7 +64,16 @@ async function visit(p){
   const {sessionId:s}=await send("Target.attachToTarget",{targetId,flatten:true});
   // A load event counts only once the real page has committed (about:blank's can arrive late).
   let status=0,loaded=false,committed=false;const frame=targetId;
+  // Replay frames: keep a few, spaced out; ack every one or Chromium stops sending.
+  const fr=[];let lastF=0,castOn=false;
+  // Stop recording as soon as this page (or the run) has all the frames it will keep: a page that
+  // animates forever would otherwise make Chromium encode and send a JPEG on every paint.
+  const stopCast=()=>{if(castOn){castOn=false;send("Page.stopScreencast",{},s,3000).catch(()=>{})}};
   const h=m=>{if(m.sessionId!==s)return;const q=m.params||{};
+    if(m.method==="Page.screencastFrame"){send("Page.screencastFrameAck",{sessionId:q.sessionId},s).catch(()=>{});
+      // Only once the real page has committed: earlier paints are about:blank.
+      const now=Date.now();if(committed&&fr.length<FPP&&framesLeft>0&&now-lastF>=FGAP&&typeof q.data==="string"&&q.data.length<=FB64&&frameBytes+q.data.length<=FBUDGET){fr.push(q.data);framesLeft--;frameBytes+=q.data.length;lastF=now}
+      if(fr.length>=FPP||framesLeft<=0||frameBytes>=FBUDGET-FB64)stopCast();return}
     if(m.method==="Network.responseReceived"&&q.type==="Document"&&q.frameId===frame)status=q.response.status;
     else if(m.method==="Page.frameNavigated"&&q.frame&&q.frame.id===frame&&!String(q.frame.url).startsWith("about:"))committed=true;
     else if(m.method==="Page.loadEventFired"&&committed)loaded=true;
@@ -61,8 +82,9 @@ async function visit(p){
   try{
     await send("Page.enable",{},s);await send("Network.enable",{},s);
     await send("Emulation.setDeviceMetricsOverride",{width:1280,height:800,deviceScaleFactor:1,mobile:false},s);
+    if(framesLeft>0&&frameBytes<FBUDGET-FB64)await send("Page.startScreencast",{format:"jpeg",quality:40,maxWidth:640,maxHeight:400,everyNthFrame:1},s,5000).then(()=>{castOn=true}).catch(()=>{});
     const nav=await send("Page.navigate",{url:BASE+p},s);
-    if(nav.errorText){out({p,err:String(nav.errorText).slice(0,200)});return}
+    if(nav.errorText){out({p,err:String(nav.errorText).slice(0,200),fr});return}
     const t0=Date.now();while(!loaded&&Date.now()-t0<LOAD)await sleep(100);
     await sleep(SETTLE);
     let info={};
@@ -72,9 +94,11 @@ async function visit(p){
       const r=await send("Runtime.evaluate",{contextId:w.executionContextId,expression:"({u:String(location.href).slice(0,2000),t:String(document.title).slice(0,300),x:String((document.body&&document.body.innerText)||'').slice(0,"+MAXT+"),pw:document.querySelectorAll('input[type=password]').length})",returnByValue:true},s,5000);
       info=(r.result&&r.result.value)||{}}catch(e){}
     const str=(v,n)=>typeof v==="string"?v.slice(0,n):undefined;
+    stopCast();
     let img=null;try{img=(await send("Page.captureScreenshot",{format:"jpeg",quality:60},s,10000)).data}catch(e){}
-    out({p,status,loaded,u:str(info.u,2000),t:str(info.t,300),x:str(info.x,MAXT),pw:Number.isInteger(info.pw)&&info.pw>=0?info.pw:0,img:typeof img==="string"?img:null});
-  }catch(e){out({p,err:String(e&&e.message||e).slice(0,200)})}
+    if(typeof img==="string"&&img.length>IMGMAX)img=null; // the parser would drop it anyway; don't spend output on it
+    out({p,status,loaded,u:str(info.u,2000),t:str(info.t,300),x:str(info.x,MAXT),pw:Number.isInteger(info.pw)&&info.pw>=0?info.pw:0,img:typeof img==="string"?img:null,fr});
+  }catch(e){out({p,err:String(e&&e.message||e).slice(0,200),fr})}
   finally{subs.delete(h);send("Target.closeTarget",{targetId}).catch(()=>{})}
 }
 (async()=>{
@@ -106,6 +130,8 @@ export interface PageCapture {
   loaded: boolean;
   /** Decoded JPEG, already checked for the JPEG signature. */
   screenshot: Buffer | null;
+  /** Replay frames while the page loaded (decoded, JPEG-checked), oldest first. */
+  frames: Buffer[];
   error?: string;
 }
 
@@ -119,14 +145,15 @@ const Line = z.object({
   x: z.string().optional().catch(undefined),
   pw: z.number().int().nonnegative().optional().catch(undefined),
   img: z.string().nullable().optional().catch(undefined),
+  fr: z.array(z.unknown()).max(MAX_FRAMES_PER_PAGE).optional().catch(undefined),
   err: z.string().optional().catch(undefined),
 });
 
 const B64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /** Decode a screenshot, accepting only a plausible JPEG (signature + end marker). */
-export function decodeJpeg(b64: unknown): Buffer | null {
-  if (typeof b64 !== "string" || b64.length < 16 || b64.length > MAX_IMG_B64 || b64.length % 4 !== 0 || !B64.test(b64)) return null;
+export function decodeJpeg(b64: unknown, maxB64 = MAX_IMG_B64): Buffer | null {
+  if (typeof b64 !== "string" || b64.length < 16 || b64.length > maxB64 || b64.length % 4 !== 0 || !B64.test(b64)) return null;
   const buf = Buffer.from(b64, "base64");
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) return null;
   if (buf[buf.length - 2] !== 0xff || buf[buf.length - 1] !== 0xd9) return null;
@@ -184,6 +211,7 @@ export function parseBrowse(stdout: string, requested: readonly string[], base: 
       hasPassword: (d.pw ?? 0) > 0,
       loaded: d.loaded ?? false,
       screenshot: decodeJpeg(d.img),
+      frames: (d.fr ?? []).map((f) => decodeJpeg(f, MAX_FRAME_B64)).filter((b): b is Buffer => b !== null),
       error: d.err?.slice(0, 200),
     });
   }
@@ -213,7 +241,13 @@ export async function browse(
       name: `va-${id}-browser`,
     });
     const parsed = parseBrowse(r.stdout, list, base);
-    const why = parsed.fatal ?? (parsed.pages.length ? undefined : `exit ${r.code}${r.timedOut ? ", timed out" : ""}${r.stderr.trim() ? `: ${r.stderr.trim().slice(-200)}` : ""}`);
+    const why =
+      parsed.fatal ??
+      (parsed.pages.length
+        ? r.truncated
+          ? "output cap reached, later pages missing"
+          : undefined
+        : `exit ${r.code}${r.timedOut ? ", timed out" : ""}${r.stderr.trim() ? `: ${r.stderr.trim().slice(-200)}` : ""}`);
     return { pages: parsed.pages, why };
   } catch (e) {
     return { pages: [], why: String((e as Error)?.message ?? e).slice(0, 200) };
