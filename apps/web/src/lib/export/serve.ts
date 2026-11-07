@@ -23,8 +23,19 @@ export async function exportableReport(req: Request, id: string): Promise<Report
   return view.report;
 }
 
-/** Links in the files point back here. Caddy only routes our own host to the app. */
-export const requestOrigin = (req: Request) => new URL(req.url).origin;
+/**
+ * Links in the files point back here. `req.url` is Next's own listen address (127.0.0.1:3000 behind
+ * Caddy), so use the Host header: Caddy only routes our own domain to the app and passes Host through
+ * (checkMutation relies on the same header). Scheme from Caddy's X-Forwarded-Proto.
+ */
+export function requestOrigin(req: Request): string {
+  const url = new URL(req.url);
+  const host = req.headers.get("host") ?? "";
+  if (!/^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) return url.origin;
+  const fwd = req.headers.get("x-forwarded-proto");
+  const proto = fwd === "https" || fwd === "http" ? fwd : url.protocol.replace(":", "");
+  return `${proto}://${host}`;
+}
 
 export function fileResponse(body: string | Buffer, r: Report, ext: "md" | "pdf"): Response {
   const bytes = typeof body === "string" ? Buffer.from(body, "utf8") : body;
