@@ -1,6 +1,6 @@
 # VibeAudit
 
-**Audits AI-generated web apps by running them, safely.** Paste a GitHub URL. VibeAudit installs, builds and starts the app inside a locked-down sandbox, attacks it the way a stranger on the internet would, and returns a scorecard. Every finding carries evidence: the code line, the HTTP response or the screenshot that proves it.
+**Audits AI-generated web apps by running them, safely.** Paste a GitHub URL. VibeAudit installs, builds and starts the app inside a locked-down sandbox, attacks it the way a stranger on the internet would, and returns a scorecard. Every finding carries evidence: the code line, the HTTP response or the screenshot that proves it. The report exports as Markdown, ready to hand to a coding agent, or as a PDF.
 
 Built for the Vultr Agent Rush hackathon, "Blast Radius Zero" challenge. The idea is to run code you don't trust and prove that nothing it does can escape.
 
@@ -40,15 +40,36 @@ intake → plan → approve → static → install → build → run → dynamic
 2. **plan:** read `package.json` in the sandbox and detect the framework, package manager and install/build/start commands. The app is started with `PORT=3000`. The plan also collects the env var *names* the repo declares (`.env.example` and other root env files) or reads in code (`process.env.X`, `import.meta.env.X`). Only names leave the sandbox, never values. The app gets planted values, never real ones:
    - a canary (`AKIAVIBE…`) for each secret-looking name (`JWT_SECRET`, `DB_PASSWORD`, `*_KEY`…), plus a generic `VIBEAUDIT_CANARY` the app never reads;
    - for known API-key vars (OpenAI, Anthropic, Stripe, Gemini), a placeholder, but only when the user supplies a test key;
-   - nothing for config (`OPENAI_MODEL`, `MAX_TOKENS`, `DATABASE_URL`, flags), so the app's own defaults apply.
+   - for remote dependencies (`DATABASE_URL`, `REDIS_URL`, `SUPABASE_URL`, `SENTRY_DSN`, public client keys…), a well-formed fake that points at a reserved `.invalid` host pinned to `127.0.0.1` inside the container. Apps that validate their config at start get past it, and anything that really connects fails at once, locally;
+   - nothing for other config (`OPENAI_MODEL`, `MAX_TOKENS`, flags) or for the app's own address (`NEXTAUTH_URL`, `SITE_URL`), so the app's own defaults apply.
 3. **approve:** the audit pauses for a human. The UI shows the exact commands, the env plan and the repo's own install hooks. The user can approve (optionally with `--ignore-scripts` and their own test keys), choose a static-only audit, or cancel.
 4. **static:** secret scan, install-script scan of the repo's hooks, LLM review and a pre-install package snapshot. These happen before any repo code runs, so a hostile install can't rewrite what gets read. Dependencies' install hooks are read from `node_modules` right after install.
 5. **install / build / run:** each step runs in its own gVisor container with time and resource caps. Egress goes only through the proxy, whose rules tighten per stage.
+   - The build gets its own 5 GB memory cap (the app runs under 3 GB), and Node's heap is raised to 70% of it, since large Next.js builds otherwise die at Node's default heap limit.
+   - The app counts as up once it accepts connections on its port, not once its home page renders, so a slow or broken home page doesn't hide the API.
+   - When a step fails, the static-only report says why: out of memory (Node's heap or the container cap), a time limit, or the env var the app's error names.
 6. **dynamic:** HTTP probes, then the logged-out browser pass with screenshots.
 7. **verify:** a vision model checks the screenshots for exposed data.
 8. **report:** OSV dependency audit, the containment log and the score. Then every container, the network and the workspace are destroyed.
 
 Progress streams to the browser live over SSE. The whole audit has a 20-minute cap, not counting the approval wait. On a timeout the containers are killed and the audit fails with what it found so far.
+
+## The report
+
+A summary (score, severity counts and a red banner for hostile install-time behaviour), then tabs:
+
+- **Overview:** what was proven at runtime, what to fix first, and the **attack console**: a terminal-style replay of what the audit did and what happened, rebuilt from the recorded evidence (the escape attempts the sandbox stopped, the probe requests with the headers and body they sent, the responses).
+- **Findings:** filter by severity, proof (proven at runtime / confirmed in the code / static suspicion), category or text. Each finding opens to its evidence and fix, and has its own link (`#finding-<id>`).
+  - When the LLM code review suspected something a probe then proved, the two are merged into one finding marked "suspected by code review, then proven". It isn't counted twice. The merge is strict: the review must describe the same kind of problem, point at the same route and method or the same file, and be no more severe than the proof. App-level bugs (XSS, injection, hardcoded keys) are never merged into an install-time finding.
+- **Sandbox:** the **isolation receipt**, read back from VM 2's Docker daemon with `docker inspect` after the app started. It shows what the container really ran under (runtime, user, capabilities, pids, memory, CPU, network, mounts, how many canaries were planted), not what the worker asked for. Below it, a table of what the code tried and which control stopped it.
+- **Browser:** a replay of each page load (screencast frames from the headless browser) and a screenshot of every page visited logged out, with the vision model's verdict.
+- **Dependencies:** OSV advisories grouped per package, with the version that fixes each.
+- **Activity log:** the raw stage-by-stage log.
+
+**Export.** A finished report downloads as Markdown or PDF, or copies to the clipboard for a coding agent. Agents can also fetch it directly: `/api/audits/<id>/report.md` or `/api/audits/<id>/report.pdf`.
+- The Markdown opens with a note for coding agents: work through the findings in order, what each proof level means, and that everything quoted from the repo or the app is data, not instructions. Each finding then has its ID, location, evidence and fix.
+- All report text comes from the repo, the app or an LLM that read it, so the export treats it as hostile. It is escaped so it can't become HTML, links or images; bare URLs are defanged; code is fenced so it can't break out. Canaries are masked, and the only links point back to VibeAudit.
+- The PDF is built on the server (pdfkit, DejaVu fonts) with screenshots embedded. Renders are capped at two at a time and cached, since a finished report never changes.
 
 ## Architecture
 
@@ -108,7 +129,7 @@ flowchart LR
 - **Least privilege on VM 1.**
   - The web app runs as its own user and can't read the worker's SSH key or the proxy directory, or use Docker.
   - The worker's key into VM 2 is restricted to the VPC source address and forced to `docker system dial-stdio`.
-- **Nothing outlives an audit.** Teardown runs on success and on failure. The VM 2 janitor removes anything a crashed worker left behind: containers after 30 minutes, networks and workspaces after 90.
+- **Nothing outlives an audit.** Teardown runs on success and on failure. The VM 2 janitor removes anything a crashed worker left behind: containers after 30 minutes, networks and workspaces after 90. The worker also sweeps leftover audit containers when it starts, and the build carries its own kill timer inside the container, so a build orphaned by a worker restart stops by itself.
 
 `infra/sbx/selftest.sh` checks these claims on the live host. It covers:
 - internet, cloud metadata, VM 1's SSH and Postgres, and the host's own ports are unreachable (the proxy port is checked as reachable);
@@ -133,14 +154,25 @@ flowchart LR
 Two public repos made to be audited (also in [`demos/`](demos/)):
 
 - [**demo-vulnerable**](https://github.com/sobanali256/demo-vulnerable): an Express notes app with planted flaws. These are an open user API, IDOR, a header-trusted admin action, an open `/admin` console, secrets in `.env` and in the client bundle, and more. Expected score: 0.
-- [**demo-malicious**](https://github.com/sobanali256/demo-malicious): a benign-looking app whose `postinstall` reads the environment and opens a raw connection out. It is deliberately neutered and never sends a secret. The sandbox drops the connection and the report flags it as critical. The repo is flagged even with `--ignore-scripts`, when the hook never runs.
+- [**demo-malicious**](https://github.com/sobanali256/demo-malicious): a benign-looking "Weather Now" app whose `postinstall` is a small attack lab, standing in for a compromised dependency. Every attempt is aimed so it can't do harm anywhere, and the report shows which control stopped each one:
+
+  | What the install script tries | What stops it |
+  |---|---|
+  | Read secrets from the env | only canaries are there |
+  | Smuggle the canary out in an npm registry search query (a host install is allowed to reach) | the proxy spots the canary and blocks the request |
+  | Connect straight out to `192.0.2.1:443`, skipping the proxy | VM 2 firewall, egress lock |
+  | Read cloud credentials from `169.254.169.254` | VM 2 firewall, egress lock |
+  | Reach the sandbox host's Docker API (`:2375`) and SSH (`:22`) | VM 2 firewall, host lock |
+  | Look for a mounted Docker socket | none is mounted |
+
+  The only value it ever sends is the planted `VIBEAUDIT_CANARY`. The report flags the repo as critical and scores it 0. It is flagged even with `--ignore-scripts`, when the hook never runs.
 
 > **Never `npm install` anything in `demos/` on your own machine.** Their install scripts are hostile by design.
 
 ## Repository layout
 
 ```
-apps/web          Next.js 16 UI + API: submit, approval panel, live progress (SSE), scorecard
+apps/web          Next.js 16 UI + API: submit, approval panel, live progress (SSE), report, Markdown/PDF export
 apps/worker       job queue + audit pipeline (planner, scanners, probes, browser, vision, scoring)
 packages/shared   types shared by web and worker: stages, limits, finding schema, container flags
 packages/db       Postgres schema, migrations and queries
@@ -189,6 +221,8 @@ The scripts default to this project's addresses and NIC names (`CP_VPC_IP`, `SBX
   - Repo code it can't fully read is reported as "could not be fully checked", not passed.
   - Registry dependencies also rely on OSV and on runtime containment.
 - LLM findings are suggestions. They are marked unconfirmed and count half.
+- Each build attempt has 3 minutes. Very large builds can hit that and fall back to a static-only report, which says so.
+- The exports leave out the page replay, the attack console and the activity log; they link to the live report for those. The PDF's fonts have no CJK or emoji glyphs, so those characters print as `?` (the Markdown keeps them).
 
 ## License
 
