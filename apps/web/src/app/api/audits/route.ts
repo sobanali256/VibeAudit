@@ -1,11 +1,13 @@
 import { countOpenAudits, createAudit } from "@vibeaudit/db";
 import { MAX_OPEN_AUDITS, parseGitHubUrl } from "@vibeaudit/shared";
 import { db } from "@/lib/db";
+import { DEMO, DEMO_MESSAGE } from "@/lib/demo";
 import { limits } from "@/lib/rate-limit";
 import { BodyError, checkMutation, clientIp, jsonError, newOwnerToken, ownerCookie, readJson } from "@/lib/request";
 
 /** Create an audit from a GitHub URL. The URL is re-validated here; the form's check is UX only. */
 export async function POST(req: Request) {
+  if (DEMO) return jsonError(503, DEMO_MESSAGE);
   const bad = checkMutation(req);
   if (bad) return jsonError(403, bad);
   const wait = limits.create.take(clientIp(req));

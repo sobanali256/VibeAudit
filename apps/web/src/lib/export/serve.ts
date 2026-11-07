@@ -4,6 +4,7 @@ import { getArtifact } from "@vibeaudit/db";
 import type { Report } from "@vibeaudit/shared";
 import { loadAuditView } from "../audits";
 import { db } from "../db";
+import { DEMO, demoArtifactBytes } from "../demo";
 import { limits } from "../rate-limit";
 import { clientIp, jsonError } from "../request";
 import { isTerminal } from "../view";
@@ -68,11 +69,20 @@ interface PdfState {
 const g = globalThis as typeof globalThis & { __vibeauditPdf2?: PdfState };
 const state = (g.__vibeauditPdf2 ??= { active: 0, cache: new Map(), bytes: 0, inflight: new Map() });
 
-export const fontDir = () => join(process.cwd(), "node_modules", "dejavu-fonts-ttf", "ttf");
+/** The three DejaVu faces the PDF uses, vendored (license beside them) so every host ships them. */
+export const fontDir = () => join(process.cwd(), "assets", "fonts");
 
 export async function loadScreenshots(r: Report): Promise<Map<string, Buffer>> {
   const names = screenshotNames(r);
-  const arts = await Promise.all(names.map((n) => getArtifact(db(), r.auditId, n).catch(() => null)));
+  const arts = await Promise.all(
+    names.map(async (n) => {
+      if (DEMO) {
+        const data = await demoArtifactBytes(r.auditId, n);
+        return data ? { mime: "image/jpeg", data } : null;
+      }
+      return getArtifact(db(), r.auditId, n).catch(() => null);
+    }),
+  );
   const out = new Map<string, Buffer>();
   arts.forEach((a, i) => {
     if (!a || a.mime !== "image/jpeg" || a.data.length > EXPORT_LIMITS.imageBytes) return;

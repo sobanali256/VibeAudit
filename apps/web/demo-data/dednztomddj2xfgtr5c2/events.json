@@ -1,0 +1,209 @@
+[
+ {
+  "id": "910",
+  "at": "2026-11-06T10:19:55.763Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "intake"
+  }
+ },
+ {
+  "id": "911",
+  "at": "2026-11-06T10:19:56.153Z",
+  "kind": "log",
+  "payload": {
+   "msg": "resolved sobanali256/demo-vulnerable@main",
+   "stage": "intake"
+  }
+ },
+ {
+  "id": "912",
+  "at": "2026-11-06T10:19:57.962Z",
+  "kind": "log",
+  "payload": {
+   "msg": "unpacked 4238 bytes",
+   "stage": "intake"
+  }
+ },
+ {
+  "id": "913",
+  "at": "2026-11-06T10:19:57.966Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "plan"
+  }
+ },
+ {
+  "id": "914",
+  "at": "2026-11-06T10:19:58.616Z",
+  "kind": "log",
+  "payload": {
+   "msg": "framework=express pm=npm",
+   "stage": "plan"
+  }
+ },
+ {
+  "id": "915",
+  "at": "2026-11-06T10:19:58.619Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "approve"
+  }
+ },
+ {
+  "id": "916",
+  "at": "2026-11-06T10:19:58.632Z",
+  "kind": "awaiting_approval",
+  "payload": {
+   "requestId": "eUAq4YFVizAX"
+  }
+ },
+ {
+  "id": "917",
+  "at": "2026-11-06T10:20:02.646Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "static"
+  }
+ },
+ {
+  "id": "918",
+  "at": "2026-11-06T10:20:03.309Z",
+  "kind": "log",
+  "payload": {
+   "msg": "pre-install package list: 0 from none (exit 0: (node:2) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created))",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "919",
+  "at": "2026-11-06T10:20:03.990Z",
+  "kind": "log",
+  "payload": {
+   "msg": "secret scan: 2 finding(s) from 4 candidate file(s)",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "920",
+  "at": "2026-11-06T10:20:04.638Z",
+  "kind": "log",
+  "payload": {
+   "msg": "install-script scan: no root install hooks, 0 finding(s)",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "921",
+  "at": "2026-11-06T10:20:11.123Z",
+  "kind": "log",
+  "payload": {
+   "msg": "LLM review: 10 finding(s) from 4 file(s)",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "922",
+  "at": "2026-11-06T10:20:11.127Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "install"
+  }
+ },
+ {
+  "id": "923",
+  "at": "2026-11-06T10:20:14.636Z",
+  "kind": "log",
+  "payload": {
+   "msg": "\nadded 69 packages in 3s\n\n(node:2) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n",
+   "stage": "install"
+  }
+ },
+ {
+  "id": "924",
+  "at": "2026-11-06T10:20:15.283Z",
+  "kind": "log",
+  "payload": {
+   "msg": "dependency install-script scan: no dependency install scripts; 0 finding(s)",
+   "stage": "install"
+  }
+ },
+ {
+  "id": "925",
+  "at": "2026-11-06T10:20:15.287Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "run"
+  }
+ },
+ {
+  "id": "926",
+  "at": "2026-11-06T10:20:18.197Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "927",
+  "at": "2026-11-06T10:20:24.013Z",
+  "kind": "log",
+  "payload": {
+   "msg": "probed users (200), debug (200), idor (200), admin-header (200), chat (502), crash (500)",
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "928",
+  "at": "2026-11-06T10:20:37.236Z",
+  "kind": "log",
+  "payload": {
+   "msg": "browser: 7 page(s) visited, 2 screenshot(s) kept, 7 replay frame(s)",
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "929",
+  "at": "2026-11-06T10:20:37.239Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "verify"
+  }
+ },
+ {
+  "id": "930",
+  "at": "2026-11-06T10:20:38.393Z",
+  "kind": "log",
+  "payload": {
+   "msg": "vision: 1 of 1 page(s) checked, 1 exposed",
+   "stage": "verify"
+  }
+ },
+ {
+  "id": "931",
+  "at": "2026-11-06T10:20:38.396Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "report"
+  }
+ },
+ {
+  "id": "932",
+  "at": "2026-11-06T10:20:39.827Z",
+  "kind": "log",
+  "payload": {
+   "msg": "dependency audit: 3 flagged, 69 package(s) checked (69 production; from installed)",
+   "stage": "report"
+  }
+ },
+ {
+  "id": "933",
+  "at": "2026-11-06T10:20:40.423Z",
+  "kind": "done",
+  "payload": {
+   "score": 0,
+   "status": "completed",
+   "findings": 19
+  }
+ }
+]

@@ -1,0 +1,201 @@
+[
+ {
+  "id": "934",
+  "at": "2026-11-06T10:20:44.579Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "intake"
+  }
+ },
+ {
+  "id": "935",
+  "at": "2026-11-06T10:20:44.756Z",
+  "kind": "log",
+  "payload": {
+   "msg": "resolved sobanali256/demo-malicious@main",
+   "stage": "intake"
+  }
+ },
+ {
+  "id": "936",
+  "at": "2026-11-06T10:20:46.321Z",
+  "kind": "log",
+  "payload": {
+   "msg": "unpacked 3399 bytes",
+   "stage": "intake"
+  }
+ },
+ {
+  "id": "937",
+  "at": "2026-11-06T10:20:46.325Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "plan"
+  }
+ },
+ {
+  "id": "938",
+  "at": "2026-11-06T10:20:46.954Z",
+  "kind": "log",
+  "payload": {
+   "msg": "framework=express pm=npm",
+   "stage": "plan"
+  }
+ },
+ {
+  "id": "939",
+  "at": "2026-11-06T10:20:46.958Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "approve"
+  }
+ },
+ {
+  "id": "940",
+  "at": "2026-11-06T10:20:46.965Z",
+  "kind": "awaiting_approval",
+  "payload": {
+   "requestId": "hNY5FQuA0LyZ"
+  }
+ },
+ {
+  "id": "941",
+  "at": "2026-11-06T10:20:50.974Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "static"
+  }
+ },
+ {
+  "id": "942",
+  "at": "2026-11-06T10:20:51.610Z",
+  "kind": "log",
+  "payload": {
+   "msg": "pre-install package list: 0 from none (exit 0: (node:2) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created))",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "943",
+  "at": "2026-11-06T10:20:52.240Z",
+  "kind": "log",
+  "payload": {
+   "msg": "secret scan: 0 finding(s) from 1 candidate file(s)",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "944",
+  "at": "2026-11-06T10:20:52.892Z",
+  "kind": "log",
+  "payload": {
+   "msg": "install-script scan: root hooks postinstall, 1 finding(s)",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "945",
+  "at": "2026-11-06T10:20:58.767Z",
+  "kind": "log",
+  "payload": {
+   "msg": "LLM review: 8 finding(s) from 2 file(s)",
+   "stage": "static"
+  }
+ },
+ {
+  "id": "946",
+  "at": "2026-11-06T10:20:58.770Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "install"
+  }
+ },
+ {
+  "id": "947",
+  "at": "2026-11-06T10:21:10.976Z",
+  "kind": "log",
+  "payload": {
+   "msg": "\n> weather-now@1.0.0 postinstall\n> node scripts/setup.js\n\n[demo-malicious] env-scan: 0 secret-looking vars visible\n[demo-malicious] exfil-via-registry: HTTP 403 (blocked)\n[demo-malicious] direct-egress: blocked (ECONNREFUSED)\n[demo-malicious] cloud-metadata: blocked (ECONNREFUSED)\n[demo-malicious] host-docker-api: blocked (timeout)\n[demo-malicious] host-ssh: blocked (timeout)\n[demo-malicious] docker-socket: absent\n[demo-malicious] done: postinstall complete\n\nadded 69 packages in 11s\n\n(node:2) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n(node:17) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n",
+   "stage": "install"
+  }
+ },
+ {
+  "id": "948",
+  "at": "2026-11-06T10:21:11.623Z",
+  "kind": "log",
+  "payload": {
+   "msg": "dependency install-script scan: no dependency install scripts; 0 finding(s)",
+   "stage": "install"
+  }
+ },
+ {
+  "id": "949",
+  "at": "2026-11-06T10:21:11.626Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "run"
+  }
+ },
+ {
+  "id": "950",
+  "at": "2026-11-06T10:21:14.454Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "951",
+  "at": "2026-11-06T10:21:19.588Z",
+  "kind": "log",
+  "payload": {
+   "msg": "probed users (404), debug (404), idor (404), admin-header (404), chat (404), crash (404)",
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "952",
+  "at": "2026-11-06T10:21:32.805Z",
+  "kind": "log",
+  "payload": {
+   "msg": "browser: 7 page(s) visited, 1 screenshot(s) kept, 7 replay frame(s)",
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "953",
+  "at": "2026-11-06T10:21:32.806Z",
+  "kind": "log",
+  "payload": {
+   "msg": "vision: no pages to check (nothing beyond the home page served content of its own)",
+   "stage": "dynamic"
+  }
+ },
+ {
+  "id": "954",
+  "at": "2026-11-06T10:21:32.809Z",
+  "kind": "stage",
+  "payload": {
+   "stage": "report"
+  }
+ },
+ {
+  "id": "955",
+  "at": "2026-11-06T10:21:33.825Z",
+  "kind": "log",
+  "payload": {
+   "msg": "dependency audit: 3 flagged, 69 package(s) checked (69 production; from installed)",
+   "stage": "report"
+  }
+ },
+ {
+  "id": "956",
+  "at": "2026-11-06T10:21:34.360Z",
+  "kind": "done",
+  "payload": {
+   "score": 0,
+   "status": "completed",
+   "findings": 7
+  }
+ }
+]

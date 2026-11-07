@@ -211,6 +211,20 @@ The worker reads `process.env` only: export the variables from `.env.example` (f
 
 The scripts default to this project's addresses and NIC names (`CP_VPC_IP`, `SBX_VPC_IP`, `PUBLIC_IP`, `VPC_IF`, `PUB_IF`). The setup scripts run on the VMs over `ssh … 'bash -s'`, which doesn't forward local env, so for your own VMs change the defaults at the top of the `infra/` scripts.
 
+### Read-only demo
+
+With `VIBEAUDIT_DEMO=1` the web app serves the two demo reports (demo-vulnerable and demo-malicious) from snapshots in the repo. It needs no database, worker or sandbox, so it can run on any free Next.js host.
+- The snapshots are `apps/web/demo-data/<id>/` (the report and its activity log) and `apps/web/public/demo/<id>/` (screenshots and replay frames).
+- Every report feature works: tabs, the browser replay, the attack console, the isolation receipt, and the Markdown and PDF exports.
+- Starting or approving an audit answers 503 with a note that live audits are offline.
+- `node apps/web/scripts/demo-snapshot.mjs <live-url> <audit-id>…` refreshes the snapshots from a live instance, using only its public API.
+
+To run it locally: `VIBEAUDIT_DEMO=1 pnpm --filter @vibeaudit/web build`, then the same variable with `start`. The variable must be set for the build too, since the landing page is prerendered.
+
+To host it on Vercel:
+- Import the repo with **Root Directory** `apps/web` and the environment variable `VIBEAUDIT_DEMO=1`, set for builds as well as runtime.
+- Leave the build settings at the defaults; Vercel detects pnpm from `packageManager`.
+
 ## Limitations
 
 - Only GitHub URLs are accepted; zip upload is not implemented. Runtime auditing covers Node web apps only.

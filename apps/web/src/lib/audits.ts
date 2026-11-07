@@ -1,12 +1,14 @@
 import "server-only";
 import { type AuditEventRow, type AuditSummaryRow, getAuditSummary, getReport, listEvents, queuePosition } from "@vibeaudit/db";
 import { db, generation } from "./db";
+import { DEMO, demoView } from "./demo";
 import { type AuditEventView, type AuditView, isTerminal } from "./view";
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
 /** Load the public view of an audit. The report column is only read once it's final. */
 export async function loadAuditView(id: string, owner: (row: AuditSummaryRow) => boolean): Promise<AuditView | null> {
+  if (DEMO) return demoView(id);
   const sql = db();
   const row = await getAuditSummary(sql, id);
   if (!row) return null;

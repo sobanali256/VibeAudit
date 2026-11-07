@@ -5,7 +5,7 @@ import { reportToPdf } from "./pdf";
 import { screenshotNames } from "./shared";
 
 // Tests run from the repo root, where pnpm doesn't hoist the font package: resolve via apps/web.
-const fontDir = fileURLToPath(new URL("../../../node_modules/dejavu-fonts-ttf/ttf/", import.meta.url));
+const fontDir = fileURLToPath(new URL("../../../assets/fonts/", import.meta.url));
 const ORIGIN = "https://va.example";
 // 1x1 JPEG (has an SOF2 marker, which is all pdfkit reads).
 const JPEG = Buffer.from(

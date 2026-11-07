@@ -1,0 +1,552 @@
+{
+ "id": "dednztomddj2xfgtr5c2",
+ "source": {
+  "kind": "github",
+  "repo": "demo-vulnerable",
+  "owner": "sobanali256"
+ },
+ "status": "completed",
+ "stage": "report",
+ "createdAt": "2026-11-06T10:19:55.739Z",
+ "startedAt": "2026-11-06T10:19:55.746Z",
+ "finishedAt": "2026-11-06T10:20:40.427Z",
+ "error": null,
+ "approval": null,
+ "decision": {
+  "auditId": "dednztomddj2xfgtr5c2",
+  "decision": "approve",
+  "requestId": "eUAq4YFVizAX",
+  "testKeyVars": [],
+  "ignoreScripts": false
+ },
+ "report": {
+  "mode": "runtime",
+  "pages": [
+   {
+    "path": "/",
+    "title": "NoteNest",
+    "frames": [
+     "frame-1-1.jpg"
+    ],
+    "status": 200,
+    "finalPath": "/",
+    "screenshot": "page-1.jpg"
+   },
+   {
+    "path": "/admin",
+    "title": "NoteNest Admin",
+    "frames": [
+     "frame-2-1.jpg"
+    ],
+    "status": 200,
+    "verdict": "Admin screen shown to a logged-out visitor. Vision check: \"A logged-out visitor sees a full admin user-management table listing user emails, roles, password hashes, and Delete buttons.\"",
+    "finalPath": "/admin",
+    "screenshot": "page-2.jpg"
+   },
+   {
+    "path": "/dashboard",
+    "title": "Error",
+    "frames": [
+     "frame-3-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/dashboard"
+   },
+   {
+    "path": "/admin/users",
+    "title": "Error",
+    "frames": [
+     "frame-4-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/admin/users"
+   },
+   {
+    "path": "/settings",
+    "title": "Error",
+    "frames": [
+     "frame-5-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/settings"
+   },
+   {
+    "path": "/account",
+    "title": "Error",
+    "frames": [
+     "frame-6-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/account"
+   },
+   {
+    "path": "/users",
+    "title": "Error",
+    "frames": [
+     "frame-7-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/users"
+   }
+  ],
+  "score": 0,
+  "source": {
+   "kind": "github",
+   "repo": "demo-vulnerable",
+   "owner": "sobanali256"
+  },
+  "status": "completed",
+  "auditId": "dednztomddj2xfgtr5c2",
+  "controls": {
+   "cpus": 1.5,
+   "user": "1000:1000",
+   "capAdd": [],
+   "mounts": [
+    {
+     "rw": true,
+     "destination": "/workspace"
+    },
+    {
+     "rw": false,
+     "destination": "/etc/vibeaudit/proxy-ca.pem"
+    }
+   ],
+   "capDrop": [
+    "ALL"
+   ],
+   "network": "va-dednztomddj2xfgtr5c2",
+   "planted": {
+    "canaries": 4,
+    "placeholders": 0
+   },
+   "runtime": "runsc",
+   "pidsLimit": 1024,
+   "privileged": false,
+   "egressProxy": true,
+   "memoryBytes": 3221225472,
+   "noNewPrivileges": true
+  },
+  "findings": [
+   {
+    "id": "f-secret-1",
+    "fix": "Revoke and rotate this key now (it has been exposed), move it to a server-side environment variable, and remove it from the repo history.",
+    "title": "Secret committed in .env",
+    "source": "secret_scan",
+    "category": "secret_exposure",
+    "evidence": [
+     {
+      "file": ".env",
+      "kind": "code",
+      "line": 2,
+      "snippet": "OPENAI_API_KEY=sk-PLAN…[redacted 43 chars]"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": true,
+    "description": ".env is committed to the repository with a real-looking OpenAI API key. Anyone with read access to the repo, or its history, has it."
+   },
+   {
+    "id": "f-secret-2",
+    "fix": "Revoke and rotate this key now (it has been exposed), move it to a server-side environment variable, and remove it from the repo history.",
+    "title": "Hardcoded credential exposed to the browser",
+    "source": "secret_scan",
+    "category": "secret_exposure",
+    "evidence": [
+     {
+      "file": "public/app.js",
+      "kind": "code",
+      "line": 2,
+      "snippet": "const STRIPE_SECRET_KEY = \"sk_l…[redacted 40 chars]\";"
+     }
+    ],
+    "severity": "high",
+    "confirmed": false,
+    "description": "public/app.js contains a Hardcoded credential in code that is served to the browser. Anyone visiting the app can read it."
+   },
+   {
+    "id": "llm-1",
+    "fix": "Remove secrets from client code; keep them server-side in environment variables.",
+    "title": "Secrets hardcoded in client bundle",
+    "source": "llm_review",
+    "category": "secret_exposure",
+    "evidence": [
+     {
+      "file": "public/app.js",
+      "kind": "code",
+      "line": 2,
+      "snippet": "const STRIPE_SECRET_KEY = \"sk_l…[redacted 40 chars]\";"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": false,
+    "description": "A Stripe secret key and admin API token are embedded in publicly served JavaScript, letting anyone extract them."
+   },
+   {
+    "id": "llm-3",
+    "fix": "Remove the endpoint entirely or gate it behind strict admin auth and redact secrets.",
+    "title": "Debug endpoint dumps process environment",
+    "source": "llm_review",
+    "category": "secret_exposure",
+    "evidence": [
+     {
+      "file": "server.js",
+      "kind": "code",
+      "line": 57,
+      "snippet": "app.get(\"/api/debug\", (req, res) => res.json({ env: process.env, cwd: process.cwd() }));"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": false,
+    "description": "/api/debug returns process.env, leaking OPENAI_API_KEY, ADMIN_PASSWORD, and any other secrets to anyone."
+   },
+   {
+    "id": "llm-4",
+    "fix": "Use server-side session/token-based authentication and derive the role from the authenticated user.",
+    "title": "Admin action trusts client-supplied X-User-Role header",
+    "source": "llm_review",
+    "category": "missing_auth",
+    "evidence": [
+     {
+      "file": "server.js",
+      "kind": "code",
+      "line": 44,
+      "snippet": "if (req.headers[\"x-user-role\"] !== \"admin\") return res.status(403).json({ error: \"admins only\" });"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": false,
+    "description": "The delete-user endpoint authorizes based on a header the client can set to 'admin', allowing arbitrary user deletion."
+   },
+   {
+    "id": "llm-5",
+    "fix": "Authenticate the request and verify the note's ownerId matches the current user.",
+    "title": "IDOR: notes readable without ownership check",
+    "source": "llm_review",
+    "category": "open_data",
+    "evidence": [
+     {
+      "file": "server.js",
+      "kind": "code",
+      "line": 37,
+      "snippet": "app.get(\"/api/notes/:id\", (req, res) => {"
+     }
+    ],
+    "severity": "high",
+    "confirmed": false,
+    "description": "Any note can be fetched by id with no authentication or owner check, exposing confidential data like revenue figures."
+   },
+   {
+    "id": "llm-6",
+    "fix": "Use a password hashing library (e.g., bcrypt) and issue cryptographically random session tokens that are verified on protected routes.",
+    "title": "Plain-text password comparison and predictable token",
+    "source": "llm_review",
+    "category": "unsafe_defaults",
+    "evidence": [
+     {
+      "file": "server.js",
+      "kind": "code",
+      "line": 52,
+      "snippet": "if (req.body.password === process.env.ADMIN_PASSWORD) return res.json({ token: \"admin-\" + Date.now() });"
+     }
+    ],
+    "severity": "high",
+    "confirmed": false,
+    "description": "Login compares a plain-text password against ADMIN_PASSWORD and issues a guessable token ('admin-' + timestamp) with no session validation anywhere."
+   },
+   {
+    "id": "llm-10",
+    "fix": "Use textContent or escape the content before insertion.",
+    "title": "XSS via innerHTML injection of API response",
+    "source": "llm_review",
+    "category": "unsafe_defaults",
+    "evidence": [
+     {
+      "file": "public/app.js",
+      "kind": "code",
+      "line": 10,
+      "snippet": "document.getElementById(\"out\").innerHTML = JSON.stringify(await r.json(), null, 2);"
+     }
+    ],
+    "severity": "medium",
+    "confirmed": false,
+    "description": "The chat response is inserted with innerHTML, so attacker-controlled content in the JSON response is rendered as HTML."
+   },
+   {
+    "id": "f-users",
+    "title": "User records exposed without authentication",
+    "source": "probe",
+    "category": "missing_auth",
+    "evidence": [
+     {
+      "url": "/api/users",
+      "kind": "http",
+      "method": "GET",
+      "status": 200,
+      "bodyExcerpt": "[{\"id\":1,\"email\":\"alice@example.com\",\"role\":\"admin\",\"passwordHash\":\"5f4dcc3b5aa765d61d8327deb882cf99\"},{\"id\":2,\"email\":\"bob@example.com\",\"role\":\"user\",\"passwordHash\":\"e10adc3949ba59abbe56e057f20f883e\"},{\"id\":3,\"email\":\"carol@example.com\",\"role\":\"user\",\"passwordHash\":\"25d55ad283aa400af464c76d713c07ad"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": true,
+    "description": "GET /api/users returns the full user table, including password hashes, with no authentication.",
+    "corroboratedBy": [
+     {
+      "file": "server.js",
+      "line": 34,
+      "title": "/api/users exposes all users and password hashes unauthenticated",
+      "source": "llm_review",
+      "severity": "critical"
+     }
+    ]
+   },
+   {
+    "id": "f-debug",
+    "title": "Debug endpoint dumps the environment",
+    "source": "probe",
+    "category": "secret_exposure",
+    "evidence": [
+     {
+      "url": "/api/debug",
+      "kind": "http",
+      "method": "GET",
+      "status": 200,
+      "bodyExcerpt": "{\"env\":{\"HTTPS_PROXY\":\"http://10.1.96.4:8080\",\"STORYBOOK_DISABLE_TELEMETRY\":\"1\",\"NODE_EXTRA_CA_CERTS\":\"/etc/vibeaudit/proxy-ca.pem\",\"NO_UPDATE_NOTIFIER\":\"1\",\"npm_config_user_agent\":\"npm/10.9.9 node/v22.23.4 linux x64 workspaces/false\",\"NODE_VERSION\":\"22.23.4\",\"PUPPETEER_SKIP_CHROMIUM_DOWNLOAD\":\"1\",\""
+     }
+    ],
+    "severity": "high",
+    "confirmed": true,
+    "description": "GET /api/debug returns process environment variables and server internals to any caller."
+   },
+   {
+    "id": "f-idor",
+    "title": "Any record readable by id (IDOR)",
+    "source": "probe",
+    "category": "missing_auth",
+    "evidence": [
+     {
+      "url": "/api/notes/2",
+      "kind": "http",
+      "method": "GET",
+      "status": 200,
+      "bodyExcerpt": "{\"id\":2,\"ownerId\":2,\"text\":\"Bob's private note\"}"
+     }
+    ],
+    "severity": "high",
+    "confirmed": true,
+    "description": "GET /api/notes/:id returns a record for any id with no authentication or ownership check, so one user can read another's data."
+   },
+   {
+    "id": "f-admin-header",
+    "title": "Admin action authorized by a client-supplied header",
+    "source": "probe",
+    "category": "missing_auth",
+    "evidence": [
+     {
+      "url": "/api/admin/delete-user",
+      "kind": "http",
+      "method": "POST",
+      "status": 200,
+      "request": {
+       "body": "{\"id\":3}",
+       "headers": [
+        "Content-Type: application/json",
+        "x-user-role: admin"
+       ]
+      },
+      "bodyExcerpt": "{\"ok\":true}"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": true,
+    "description": "POST /api/admin/delete-user performs a privileged action when the request sets x-user-role: admin, a value any client controls, so anyone can act as an administrator."
+   },
+   {
+    "id": "f-chat",
+    "title": "AI proxy endpoint has no authentication or rate limit",
+    "source": "probe",
+    "category": "missing_auth",
+    "evidence": [
+     {
+      "url": "/api/chat",
+      "kind": "http",
+      "method": "POST",
+      "status": 502,
+      "request": {
+       "body": "{\"message\":\"ping\"}",
+       "headers": [
+        "Content-Type: application/json"
+       ]
+      },
+      "bodyExcerpt": "{\"error\":\"TypeError: fetch failed\"}"
+     }
+    ],
+    "severity": "high",
+    "confirmed": true,
+    "description": "POST /api/chat forwards to a paid upstream API without requiring any auth, so anyone can run up the bill against the server's key.",
+    "corroboratedBy": [
+     {
+      "file": "server.js",
+      "line": 65,
+      "title": "Unauthenticated, unrate-limited AI proxy burns API key",
+      "source": "llm_review",
+      "severity": "high"
+     }
+    ]
+   },
+   {
+    "id": "f-crash",
+    "title": "Server errors leak stack traces",
+    "source": "probe",
+    "category": "unsafe_defaults",
+    "evidence": [
+     {
+      "url": "/api/crash",
+      "kind": "http",
+      "method": "GET",
+      "status": 500,
+      "bodyExcerpt": "<pre>Error: Unexpected failure in payment module at /srv/app/payments.js:42\n    at /workspace/app/server.js:61:9\n    at Layer.handle [as handle_request] (/workspace/app/node_modules/express/lib/router/layer.js:95:5)\n    at next (/workspace/app/node_modules/express/lib/router/route.js:149:13)\n    at "
+     }
+    ],
+    "severity": "medium",
+    "confirmed": true,
+    "description": "An unhandled error on /api/crash returns a full stack trace, exposing file paths and server internals.",
+    "corroboratedBy": [
+     {
+      "file": "server.js",
+      "line": 84,
+      "title": "Error handler leaks stack traces",
+      "source": "llm_review",
+      "severity": "medium"
+     }
+    ]
+   },
+   {
+    "id": "f-cors",
+    "title": "Wildcard CORS policy",
+    "source": "probe",
+    "category": "unsafe_defaults",
+    "evidence": [
+     {
+      "url": "/api/users",
+      "kind": "http",
+      "method": "GET",
+      "status": 200,
+      "headers": {
+       "access-control-allow-origin": "*"
+      }
+     }
+    ],
+    "severity": "medium",
+    "confirmed": true,
+    "description": "Responses send Access-Control-Allow-Origin: *, letting any website read the API's responses in a victim's browser.",
+    "corroboratedBy": [
+     {
+      "file": "server.js",
+      "line": 11,
+      "title": "Wildcard CORS with all headers allowed",
+      "source": "llm_review",
+      "severity": "medium"
+     }
+    ]
+   },
+   {
+    "id": "f-open-page-1",
+    "fix": "Check the session on the server before rendering /admin (middleware or a route guard), and redirect logged-out visitors to the login page. Hiding links in the UI is not enough.",
+    "title": "Admin page open to logged-out visitors",
+    "source": "vision",
+    "category": "missing_auth",
+    "evidence": [
+     {
+      "kind": "screenshot",
+      "path": "page-2.jpg",
+      "verdict": "Admin screen shown to a logged-out visitor. Vision check: \"A logged-out visitor sees a full admin user-management table listing user emails, roles, password hashes, and Delete buttons.\""
+     },
+     {
+      "url": "/admin",
+      "kind": "http",
+      "method": "GET",
+      "status": 200
+     }
+    ],
+    "severity": "high",
+    "confirmed": true,
+    "description": "/admin loads for a visitor with no account or cookies. A vision check of the rendered page saw an admin screen, and the page shows real-looking records (emails, hashes or tokens)."
+   },
+   {
+    "id": "f-dep-1",
+    "fix": "Upgrade body-parser to 1.20.9 or later (update the package that depends on it, or add an override).",
+    "title": "body-parser@1.20.3 has 2 known vulnerabilities",
+    "source": "dep_audit",
+    "category": "vulnerable_dependency",
+    "evidence": [
+     {
+      "file": "node_modules/.package-lock.json",
+      "kind": "code",
+      "snippet": "body-parser@1.20.3"
+     }
+    ],
+    "severity": "medium",
+    "confirmed": false,
+    "description": "A transitive dependency (pulled in by another package) of this app is a version with published advisories. GHSA-27r3-jxmh-p828 (CVE-2026-111181): body-parser vulnerable to Denial of Service via trailing bytes after a compressed request body · GHSA-v422-hmwv-36x6 (CVE-2026-12590): body-parser vulnerable to denial of service when invalid limit value silently disables size enforcement."
+   },
+   {
+    "id": "f-dep-2",
+    "fix": "Upgrade path-to-regexp to 0.1.13 or later (update the package that depends on it, or add an override).",
+    "title": "path-to-regexp@0.1.12 has a known vulnerability",
+    "source": "dep_audit",
+    "category": "vulnerable_dependency",
+    "evidence": [
+     {
+      "file": "node_modules/.package-lock.json",
+      "kind": "code",
+      "snippet": "path-to-regexp@0.1.12"
+     }
+    ],
+    "severity": "medium",
+    "confirmed": false,
+    "description": "A transitive dependency (pulled in by another package) of this app is a version with published advisories. GHSA-37ch-88jc-xwx2 (CVE-2024-45296, CVE-2026-4867, GHSA-9wv6-86v2-598j): path-to-regexp vulnerable to Regular Expression Denial of Service via multiple route parameters."
+   },
+   {
+    "id": "f-dep-3",
+    "fix": "Upgrade qs to 6.16.1 or later (update the package that depends on it, or add an override).",
+    "title": "qs@6.13.0 has 5 known vulnerabilities",
+    "source": "dep_audit",
+    "category": "vulnerable_dependency",
+    "evidence": [
+     {
+      "file": "node_modules/.package-lock.json",
+      "kind": "code",
+      "snippet": "qs@6.13.0"
+     }
+    ],
+    "severity": "low",
+    "confirmed": false,
+    "description": "A transitive dependency (pulled in by another package) of this app is a version with published advisories. GHSA-4mjr-xmp4-gh2g (CVE-2026-82417): qs: Denial of Service via Attacker Controlled isBuffer · GHSA-6pq8-jhm2-2vcw (CVE-2026-110816): qs : qs.stringify with arrayFormat 'comma' throws an uncaught TypeError on array elements carrying a non-callable own toString (DoS) · GHSA-6rw7-vpxm-498p (CVE-2025-15284): qs's arrayLimit bypass in its bracket notation allows DoS via memory exhaustion · GHSA-q8mj-m7cp-5q26 (CVE-2026-8723): qs has a remotely triggerable DoS: qs.stringify crashes with TypeError on null/undefined entries in comma-format arrays when encodeValuesOnly is set · GHSA-w7fw-mjwx-w883 (CVE-2026-2391): qs's arrayLimit bypass in comma parsing allows denial of service."
+   }
+  ],
+  "startedAt": "2026-11-06T10:19:55.754Z",
+  "finishedAt": "2026-11-06T10:20:40.422Z",
+  "containment": [
+   {
+    "at": "2026-11-06T10:20:12.199Z",
+    "host": "registry.npmjs.org",
+    "stage": "install",
+    "method": "GET",
+    "repeat": 100,
+    "source": "proxy",
+    "verdict": "allowed"
+   },
+   {
+    "at": "2026-11-06T10:20:22.203Z",
+    "host": "api.openai.com",
+    "path": "",
+    "stage": "dynamic",
+    "method": "CONNECT",
+    "reason": "host not allowed in stage run",
+    "source": "proxy",
+    "verdict": "blocked"
+   }
+  ]
+ },
+ "queuePosition": null,
+ "isOwner": false
+}

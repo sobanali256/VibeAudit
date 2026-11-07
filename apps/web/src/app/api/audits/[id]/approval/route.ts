@@ -2,6 +2,7 @@ import { decideApproval, getAuditSummary } from "@vibeaudit/db";
 import { ApprovalDecision, ApprovalSecrets } from "@vibeaudit/shared";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { DEMO, DEMO_MESSAGE } from "@/lib/demo";
 import { limits } from "@/lib/rate-limit";
 import { BodyError, checkMutation, clientIp, isOwner, jsonError, readJson } from "@/lib/request";
 
@@ -19,6 +20,7 @@ const Body = z.object({
  * and never included in any error message (which is why parse errors are generic here).
  */
 export async function POST(req: Request, ctx: RouteContext<"/api/audits/[id]/approval">) {
+  if (DEMO) return jsonError(503, DEMO_MESSAGE);
   const { id } = await ctx.params;
   const bad = checkMutation(req);
   if (bad) return jsonError(403, bad);

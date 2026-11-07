@@ -1,5 +1,6 @@
 import { getArtifact } from "@vibeaudit/db";
 import { db } from "@/lib/db";
+import { DEMO, demoArtifactPath } from "@/lib/demo";
 import { limits } from "@/lib/rate-limit";
 import { clientIp, jsonError } from "@/lib/request";
 
@@ -11,6 +12,12 @@ import { clientIp, jsonError } from "@/lib/request";
  */
 export async function GET(req: Request, ctx: RouteContext<"/api/audits/[id]/artifacts/[name]">) {
   const { id, name } = await ctx.params;
+  if (DEMO) {
+    // Snapshotted screenshots are static files; a relative Location keeps the browser on our host.
+    const path = demoArtifactPath(id, name);
+    if (!path) return jsonError(404, "not found");
+    return new Response(null, { status: 308, headers: { location: path, "cache-control": "public, max-age=86400" } });
+  }
   const wait = limits.artifact!.take(clientIp(req));
   if (wait) return jsonError(429, "slow down", { "retry-after": String(wait) });
   const art = await getArtifact(db(), id, name);

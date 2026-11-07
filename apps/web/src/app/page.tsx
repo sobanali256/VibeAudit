@@ -2,6 +2,7 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { loadAuditView } from "@/lib/audits";
+import { DEMO, DEMO_MESSAGE } from "@/lib/demo";
 import { DEMO_REPOS, FEATURED } from "./featured";
 import { RepoUrlForm } from "./repo-url-form";
 
@@ -32,10 +33,22 @@ export default function Home() {
             welcome: it never sees a real secret, and everything it tries is stopped and logged.
           </p>
         </div>
-        <RepoUrlForm demos={DEMO_REPOS} />
-        <p className="text-xs text-zinc-500">
-          Public repos only. An audit takes 3 to 6 minutes and one runs at a time, so you may queue briefly.
-        </p>
+        {DEMO ? (
+          <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+            {DEMO_MESSAGE}{" "}
+            <a href="https://github.com/sobanali256/VibeAudit" className="font-medium underline underline-offset-2">
+              Watch the demo video or deploy your own
+            </a>
+            .
+          </div>
+        ) : (
+          <>
+            <RepoUrlForm demos={DEMO_REPOS} />
+            <p className="text-xs text-zinc-500">
+              Public repos only. An audit takes 3 to 6 minutes and one runs at a time, so you may queue briefly.
+            </p>
+          </>
+        )}
       </section>
 
       <section aria-labelledby="featured-title" className="flex flex-col gap-4">

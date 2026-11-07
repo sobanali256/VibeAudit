@@ -2,6 +2,7 @@ import type { AuditEventRow } from "@vibeaudit/db";
 import { AUDIT_ID_RE } from "@vibeaudit/shared";
 import { loadAuditView, sharedAuditView, sharedEvents, toEventView } from "@/lib/audits";
 import { subscribe } from "@/lib/db";
+import { DEMO, demoEvents, demoView } from "@/lib/demo";
 import { limits } from "@/lib/rate-limit";
 import { clientIp, isOwner, jsonError } from "@/lib/request";
 import { isTerminal } from "@/lib/view";
@@ -30,6 +31,7 @@ const streams = (g.__vibeauditStreams ??= { total: 0, perIp: new Map() });
 export async function GET(req: Request, ctx: RouteContext<"/api/audits/[id]/events">) {
   const { id } = await ctx.params;
   if (!AUDIT_ID_RE.test(id)) return jsonError(404, "audit not found");
+  if (DEMO) return demoStream(id);
 
   const ip = clientIp(req);
   const wait = limits.read.take(ip);
@@ -208,5 +210,17 @@ export async function GET(req: Request, ctx: RouteContext<"/api/audits/[id]/even
       "cache-control": "no-store, no-transform",
       "x-accel-buffering": "no",
     },
+  });
+}
+
+/** Read-only demo: the snapshot's state, every event, then end. Nothing is live, so no LISTEN. */
+function demoStream(id: string): Response {
+  const view = demoView(id);
+  if (!view) return jsonError(404, "audit not found");
+  const lines = [`event: state\ndata: ${JSON.stringify(view)}\n\n`];
+  for (const e of demoEvents(id)) lines.push(`id: ${e.id}\nevent: ev\ndata: ${JSON.stringify(e)}\n\n`);
+  lines.push("event: end\ndata: {}\n\n");
+  return new Response(lines.join(""), {
+    headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });
 }

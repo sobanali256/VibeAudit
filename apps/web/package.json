@@ -12,7 +12,6 @@
   "dependencies": {
     "@vibeaudit/db": "workspace:*",
     "@vibeaudit/shared": "workspace:*",
-    "dejavu-fonts-ttf": "2.37.3",
     "next": "16.4.4",
     "pdfkit": "0.20.2",
     "react": "19.3.0",

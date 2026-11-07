@@ -1,0 +1,402 @@
+{
+ "id": "xgiengqylqdrxpzbxj2n",
+ "source": {
+  "kind": "github",
+  "repo": "demo-malicious",
+  "owner": "sobanali256"
+ },
+ "status": "completed",
+ "stage": "report",
+ "createdAt": "2026-11-06T10:20:44.563Z",
+ "startedAt": "2026-11-06T10:20:44.573Z",
+ "finishedAt": "2026-11-06T10:21:34.363Z",
+ "error": null,
+ "approval": null,
+ "decision": {
+  "auditId": "xgiengqylqdrxpzbxj2n",
+  "decision": "approve",
+  "requestId": "hNY5FQuA0LyZ",
+  "testKeyVars": [],
+  "ignoreScripts": false
+ },
+ "report": {
+  "mode": "runtime",
+  "pages": [
+   {
+    "path": "/",
+    "title": "Weather Now",
+    "frames": [
+     "frame-1-1.jpg"
+    ],
+    "status": 200,
+    "finalPath": "/",
+    "screenshot": "page-1.jpg"
+   },
+   {
+    "path": "/admin",
+    "title": "Error",
+    "frames": [
+     "frame-2-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/admin"
+   },
+   {
+    "path": "/dashboard",
+    "title": "Error",
+    "frames": [
+     "frame-3-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/dashboard"
+   },
+   {
+    "path": "/admin/users",
+    "title": "Error",
+    "frames": [
+     "frame-4-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/admin/users"
+   },
+   {
+    "path": "/settings",
+    "title": "Error",
+    "frames": [
+     "frame-5-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/settings"
+   },
+   {
+    "path": "/account",
+    "title": "Error",
+    "frames": [
+     "frame-6-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/account"
+   },
+   {
+    "path": "/users",
+    "title": "Error",
+    "frames": [
+     "frame-7-1.jpg"
+    ],
+    "status": 404,
+    "finalPath": "/users"
+   }
+  ],
+  "score": 0,
+  "source": {
+   "kind": "github",
+   "repo": "demo-malicious",
+   "owner": "sobanali256"
+  },
+  "status": "completed",
+  "auditId": "xgiengqylqdrxpzbxj2n",
+  "controls": {
+   "cpus": 1.5,
+   "user": "1000:1000",
+   "capAdd": [],
+   "mounts": [
+    {
+     "rw": false,
+     "destination": "/etc/vibeaudit/proxy-ca.pem"
+    },
+    {
+     "rw": true,
+     "destination": "/workspace"
+    }
+   ],
+   "capDrop": [
+    "ALL"
+   ],
+   "network": "va-xgiengqylqdrxpzbxj2n",
+   "planted": {
+    "canaries": 1,
+    "placeholders": 0
+   },
+   "runtime": "runsc",
+   "pidsLimit": 1024,
+   "privileged": false,
+   "egressProxy": true,
+   "memoryBytes": 3221225472,
+   "noNewPrivileges": true
+  },
+  "findings": [
+   {
+    "id": "f-install-1",
+    "fix": "Remove the install hook or reduce it to a plain build step. Nothing at install time should read the environment or talk to the network.",
+    "title": "Install script reads secrets and opens network connections",
+    "source": "install_scan",
+    "category": "supply_chain",
+    "evidence": [
+     {
+      "file": "scripts/setup.js",
+      "kind": "code",
+      "line": 52,
+      "snippet": "const secretish = Object.keys(process.env).filter((k) => /KEY|TOKEN|SECRET|PASSWORD|DATABASE_URL/i.test(k));"
+     },
+     {
+      "file": "scripts/setup.js",
+      "kind": "code",
+      "line": 15,
+      "snippet": "const https = require(\"https\");"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": false,
+    "description": "The repo's own install script (postinstall) reads secrets and opens network connections. It reads the whole environment (where API keys and tokens live) and makes network connections, the pattern of install-time credential theft. This audit let it run inside the sandbox; the containment log shows what it tried.",
+    "corroboratedBy": [
+     {
+      "file": "scripts/setup.js",
+      "line": 52,
+      "title": "Install script enumerates secret-looking environment variables",
+      "source": "llm_review",
+      "severity": "medium"
+     },
+     {
+      "file": "scripts/setup.js",
+      "line": 91,
+      "title": "Install script checks for mounted Docker socket",
+      "source": "llm_review",
+      "severity": "medium"
+     }
+    ]
+   },
+   {
+    "id": "llm-8",
+    "fix": "Bind to 127.0.0.1 unless external exposure is required, or place behind a reverse proxy.",
+    "title": "Server binds to all interfaces",
+    "source": "llm_review",
+    "category": "unsafe_defaults",
+    "evidence": [
+     {
+      "file": "server.js",
+      "kind": "code",
+      "line": 11,
+      "snippet": "app.listen(port, \"0.0.0.0\", () => console.log(`demo-malicious listening on ${port}`));"
+     }
+    ],
+    "severity": "low",
+    "confirmed": false,
+    "description": "The Express app listens on 0.0.0.0, exposing the service on every network interface of the host rather than loopback."
+   },
+   {
+    "id": "f-dep-1",
+    "fix": "Upgrade body-parser to 1.20.9 or later (update the package that depends on it, or add an override).",
+    "title": "body-parser@1.20.3 has 2 known vulnerabilities",
+    "source": "dep_audit",
+    "category": "vulnerable_dependency",
+    "evidence": [
+     {
+      "file": "node_modules/.package-lock.json",
+      "kind": "code",
+      "snippet": "body-parser@1.20.3"
+     }
+    ],
+    "severity": "medium",
+    "confirmed": false,
+    "description": "A transitive dependency (pulled in by another package) of this app is a version with published advisories. GHSA-27r3-jxmh-p828 (CVE-2026-111181): body-parser vulnerable to Denial of Service via trailing bytes after a compressed request body · GHSA-v422-hmwv-36x6 (CVE-2026-12590): body-parser vulnerable to denial of service when invalid limit value silently disables size enforcement."
+   },
+   {
+    "id": "f-dep-2",
+    "fix": "Upgrade path-to-regexp to 0.1.13 or later (update the package that depends on it, or add an override).",
+    "title": "path-to-regexp@0.1.12 has a known vulnerability",
+    "source": "dep_audit",
+    "category": "vulnerable_dependency",
+    "evidence": [
+     {
+      "file": "node_modules/.package-lock.json",
+      "kind": "code",
+      "snippet": "path-to-regexp@0.1.12"
+     }
+    ],
+    "severity": "medium",
+    "confirmed": false,
+    "description": "A transitive dependency (pulled in by another package) of this app is a version with published advisories. GHSA-37ch-88jc-xwx2 (CVE-2024-45296, CVE-2026-4867, GHSA-9wv6-86v2-598j): path-to-regexp vulnerable to Regular Expression Denial of Service via multiple route parameters."
+   },
+   {
+    "id": "f-dep-3",
+    "fix": "Upgrade qs to 6.16.1 or later (update the package that depends on it, or add an override).",
+    "title": "qs@6.13.0 has 5 known vulnerabilities",
+    "source": "dep_audit",
+    "category": "vulnerable_dependency",
+    "evidence": [
+     {
+      "file": "node_modules/.package-lock.json",
+      "kind": "code",
+      "snippet": "qs@6.13.0"
+     }
+    ],
+    "severity": "low",
+    "confirmed": false,
+    "description": "A transitive dependency (pulled in by another package) of this app is a version with published advisories. GHSA-4mjr-xmp4-gh2g (CVE-2026-82417): qs: Denial of Service via Attacker Controlled isBuffer · GHSA-6pq8-jhm2-2vcw (CVE-2026-110816): qs : qs.stringify with arrayFormat 'comma' throws an uncaught TypeError on array elements carrying a non-callable own toString (DoS) · GHSA-6rw7-vpxm-498p (CVE-2025-15284): qs's arrayLimit bypass in its bracket notation allows DoS via memory exhaustion · GHSA-q8mj-m7cp-5q26 (CVE-2026-8723): qs has a remotely triggerable DoS: qs.stringify crashes with TypeError on null/undefined entries in comma-format arrays when encodeValuesOnly is set · GHSA-w7fw-mjwx-w883 (CVE-2026-2391): qs's arrayLimit bypass in comma parsing allows denial of service."
+   },
+   {
+    "id": "f-exfil-1",
+    "fix": "Find the code (often an install script or a dependency) that reads the variable and sends it out, and remove it.",
+    "title": "Secret exfiltration attempt",
+    "source": "proxy",
+    "category": "supply_chain",
+    "evidence": [
+     {
+      "url": "registry.npmjs.org/-/v1/search?size=1&text=AKIAVIBE…",
+      "kind": "http",
+      "method": "GET",
+      "status": 403,
+      "bodyExcerpt": "blocked: canary secret in outbound request"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": true,
+    "description": "During the install stage, code in the sandbox tried to send a planted canary secret to registry.npmjs.org. The egress proxy blocked it; on a real deployment that value would have left.",
+    "corroboratedBy": [
+     {
+      "file": "scripts/setup.js",
+      "line": 60,
+      "title": "Postinstall exfiltrates data via npm registry search query",
+      "source": "llm_review",
+      "severity": "high"
+     },
+     {
+      "file": "scripts/setup.js",
+      "line": 97,
+      "title": "Malicious behavior ships as a postinstall hook in the package",
+      "source": "llm_review",
+      "severity": "high"
+     }
+    ]
+   },
+   {
+    "id": "f-egress-direct",
+    "fix": "Check package.json scripts (preinstall/install/postinstall/prepare, build) and each dependency's install scripts for network calls; remove the code or the dependency. Install with --ignore-scripts until you have.",
+    "title": "Install-time code opened a direct network connection",
+    "source": "proxy",
+    "category": "supply_chain",
+    "evidence": [
+     {
+      "at": "2026-11-06T10:21:02.887Z",
+      "kind": "network",
+      "stage": "install",
+      "detail": "direction egress",
+      "target": "tcp 192.0.2.1:443",
+      "control": "firewall"
+     },
+     {
+      "at": "2026-11-06T10:21:02.889Z",
+      "kind": "network",
+      "stage": "install",
+      "detail": "direction egress",
+      "target": "tcp 169.254.169.254:80",
+      "control": "firewall"
+     },
+     {
+      "at": "2026-11-06T10:21:02.890Z",
+      "kind": "network",
+      "stage": "install",
+      "detail": "direction host",
+      "target": "tcp 172.30.0.1:2375",
+      "control": "firewall"
+     },
+     {
+      "at": "2026-11-06T10:21:06.891Z",
+      "kind": "network",
+      "stage": "install",
+      "detail": "direction host",
+      "target": "tcp 172.30.0.1:22",
+      "control": "firewall"
+     }
+    ],
+    "severity": "critical",
+    "confirmed": true,
+    "description": "During install, code from the repo or one of its dependencies tried to reach tcp 192.0.2.1:443, tcp 169.254.169.254:80, tcp 172.30.0.1:2375, tcp 172.30.0.1:22 without going through the egress proxy it was given. The sandbox firewall dropped it, so nothing left; on a developer laptop or a CI runner it would have. Package managers and legitimate download scripts honour the proxy, so a raw connection like this is deliberate: treat the repo as hostile until you know what made it.",
+    "corroboratedBy": [
+     {
+      "file": "scripts/setup.js",
+      "line": 79,
+      "title": "Postinstall probes cloud instance metadata service",
+      "source": "llm_review",
+      "severity": "high"
+     },
+     {
+      "file": "scripts/setup.js",
+      "line": 84,
+      "title": "Install script probes Docker API and SSH on the host gateway",
+      "source": "llm_review",
+      "severity": "high"
+     },
+     {
+      "file": "scripts/setup.js",
+      "line": 76,
+      "title": "Postinstall performs direct network egress bypassing any proxy",
+      "source": "llm_review",
+      "severity": "low"
+     }
+    ]
+   }
+  ],
+  "startedAt": "2026-11-06T10:20:44.577Z",
+  "finishedAt": "2026-11-06T10:21:34.360Z",
+  "containment": [
+   {
+    "at": "2026-11-06T10:20:59.972Z",
+    "host": "registry.npmjs.org",
+    "stage": "install",
+    "method": "GET",
+    "repeat": 100,
+    "source": "proxy",
+    "verdict": "allowed"
+   },
+   {
+    "at": "2026-11-06T10:21:02.884Z",
+    "host": "registry.npmjs.org",
+    "path": "/-/v1/search?size=1&text=AKIAVIBE…",
+    "stage": "install",
+    "method": "GET",
+    "reason": "canary secret in outbound request",
+    "source": "proxy",
+    "verdict": "exfil"
+   },
+   {
+    "at": "2026-11-06T10:21:02.887Z",
+    "dst": "192.0.2.1",
+    "dport": 443,
+    "proto": "tcp",
+    "stage": "install",
+    "source": "firewall",
+    "direction": "egress"
+   },
+   {
+    "at": "2026-11-06T10:21:02.889Z",
+    "dst": "169.254.169.254",
+    "dport": 80,
+    "proto": "tcp",
+    "stage": "install",
+    "source": "firewall",
+    "direction": "egress"
+   },
+   {
+    "at": "2026-11-06T10:21:02.890Z",
+    "dst": "172.30.0.1",
+    "dport": 2375,
+    "proto": "tcp",
+    "stage": "install",
+    "source": "firewall",
+    "direction": "host"
+   },
+   {
+    "at": "2026-11-06T10:21:06.891Z",
+    "dst": "172.30.0.1",
+    "dport": 22,
+    "proto": "tcp",
+    "stage": "install",
+    "source": "firewall",
+    "direction": "host"
+   }
+  ]
+ },
+ "queuePosition": null,
+ "isOwner": false
+}
