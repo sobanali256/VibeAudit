@@ -3,11 +3,12 @@
 import type { ContainmentEntry, Evidence, Finding, PageVisit, Report, SandboxControls, Severity } from "@vibeaudit/shared";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LocalTime } from "@/components/local-time";
+import { ARTIFACT_NAME_RE, CATEGORY, isAttempt, isDep, isHostile, LH_LABEL, PROOF_LABEL, type Proof, proofOf, SEV_ORDER, sortFindings } from "@/lib/report-model";
 import { describeAttempt } from "./attempts";
 import { Replay } from "./replay";
 import { AttackConsole } from "./attack-console";
+import { ExportBar } from "./export-bar";
 
-const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
 const SEV_STYLE: Record<Severity, string> = {
   critical: "bg-red-600 text-white",
   high: "bg-orange-500 text-white",
@@ -15,34 +16,12 @@ const SEV_STYLE: Record<Severity, string> = {
   low: "bg-sky-200 text-sky-900 dark:bg-sky-900 dark:text-sky-100",
   info: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
 };
-const CATEGORY: Record<Finding["category"], string> = {
-  secret_exposure: "Secret exposure",
-  missing_auth: "Missing auth",
-  open_data: "Open data",
-  unsafe_defaults: "Unsafe defaults",
-  fragile_setup: "Fragile setup",
-  vulnerable_dependency: "Vulnerable dependency",
-  supply_chain: "Supply chain",
-};
 
 /** Screenshot URL for an artifact name, or null if the name isn't one the worker writes. */
 function artifactUrl(auditId: string, name: string): string | null {
-  if (!/^[a-z0-9-]{1,40}\.jpg$/.test(name)) return null;
+  if (!ARTIFACT_NAME_RE.test(name)) return null;
   return `/api/audits/${encodeURIComponent(auditId)}/artifacts/${name}`;
 }
-
-/** Checks that prove a finding by running the app, as opposed to confirming it from the code. */
-const RUNTIME_SOURCES = new Set<Finding["source"]>(["probe", "proxy", "vision"]);
-type Proof = "runtime" | "code" | "suspicion";
-function proofOf(f: Finding): Proof {
-  // A planted marker found in the bundle the sandbox built is proof too, though its source is the scanner.
-  if (f.confirmed && (RUNTIME_SOURCES.has(f.source) || f.evidence.some((e) => e.kind === "bundle"))) return "runtime";
-  return f.confirmed ? "code" : "suspicion";
-}
-const PROOF_LABEL: Record<Proof, string> = { runtime: "Proven at runtime", code: "Confirmed in the code", suspicion: "Static suspicion" };
-
-const isDep = (f: Finding) => f.source === "dep_audit" && f.category === "vulnerable_dependency";
-const isAttempt = (e: ContainmentEntry) => !(e.source === "proxy" && e.verdict === "allowed");
 
 type TabId = "overview" | "findings" | "sandbox" | "browser" | "dependencies" | "activity";
 const TAB_IDS: TabId[] = ["overview", "findings", "sandbox", "browser", "dependencies", "activity"];
@@ -53,15 +32,9 @@ const TAB_IDS: TabId[] = ["overview", "findings", "sandbox", "browser", "depende
  * link lands on it.
  */
 export function ReportView({ report, activity }: { report: Report; activity?: ReactNode }) {
-  const findings = useMemo(
-    () =>
-      [...report.findings].sort(
-        (a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) || Number(b.confirmed) - Number(a.confirmed),
-      ),
-    [report.findings],
-  );
+  const findings = useMemo(() => sortFindings(report.findings), [report.findings]);
   // Supply-chain findings that look hostile get a banner above everything else.
-  const hostile = findings.filter((f) => f.category === "supply_chain" && (f.severity === "critical" || f.severity === "high"));
+  const hostile = findings.filter(isHostile);
   const appFindings = useMemo(() => findings.filter((f) => !isDep(f)), [findings]);
   const depFindings = useMemo(() => findings.filter(isDep), [findings]);
   const counts = SEV_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length] as const).filter(([, n]) => n);
@@ -213,6 +186,7 @@ export function ReportView({ report, activity }: { report: Report; activity?: Re
               </span>
             ) : null}
           </div>
+          <ExportBar report={report} />
         </div>
       </div>
 
@@ -544,12 +518,6 @@ function FindingsPanel({ findings, auditId }: { findings: Finding[]; auditId: st
   );
 }
 
-const LH_LABEL: Record<string, string> = {
-  performance: "Performance",
-  accessibility: "Accessibility",
-  bestPractices: "Best practices",
-  seo: "SEO",
-};
 
 function Score({ score }: { score: number }) {
   const s = Math.round(score);

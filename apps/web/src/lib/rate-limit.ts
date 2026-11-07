@@ -48,4 +48,6 @@ g.__vibeauditLimits ??= {
 // Evidence images: one report replay is ~45 of them, and judges at one venue share an IP.
 // Immutable and cached for a day, so a generous separate budget is cheap.
 g.__vibeauditLimits.artifact ??= new RateLimiter(900, 60_000);
+// Report exports (Markdown / PDF): the PDF is CPU work on VM 1 (also capped per process in export/serve.ts).
+g.__vibeauditLimits.export ??= new RateLimiter(20, 60_000);
 export const limits = g.__vibeauditLimits;

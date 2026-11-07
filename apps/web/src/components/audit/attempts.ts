@@ -13,7 +13,7 @@ export interface Attempt {
 }
 
 /** Planted canaries are fakes, but mask them like findings do so a report never prints one whole. */
-const maskCanary = (s: string) => s.replace(/AKIAVIBE[0-9A-Fa-f]{4,}/g, "AKIAVIBE…");
+const maskCanary = (s: string) => s.replace(/AKIAVIBE[0-9A-F]{4,}/gi, "AKIAVIBE…");
 
 const METADATA_IPS = new Set(["169.254.169.254", "fd00:ec2::254", "100.100.100.200"]);
 
